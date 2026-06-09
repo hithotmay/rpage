@@ -13,9 +13,10 @@
 ## ✨ 特性
 
 - 🔄 **双模式无缝切换** — 浏览器 ↔ HTTP 一键切换，Cookie 自动同步
+- 🔗 **接管已有浏览器** — 连接已打开的 Chrome，零自动化标记，永不触发验证码
 - 🎯 **直觉式定位器** — `#id`、`.class`、`xpath:`、`text=`、`@attr=val` 统一语法
 - 🍪 **Cookie 双向同步** — 浏览器 ↔ HTTP 会话共享 Cookie
-- 🥷 **反检测** — 内置 Stealth Profile（WebDriver 隐藏、WebGL/Plugin 伪装）
+- 🥷 **反检测** — 内置 Stealth（WebDriver 隐藏、UA 修复、Plugin 伪装）
 - ⚡ **智能等待** — 自动等待元素可见/可点击，减少 flaky 测试
 - 📡 **网络监控** — 请求/响应记录、拦截、Header 覆写
 - 📥 **下载管理** — 统一管理 Chromium 和 HTTP 模式下载
@@ -28,24 +29,77 @@ rpage = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
+### 方式一：接管已打开的浏览器（推荐，永不触发验证码）
+
+```bash
+# 先用命令行启动 Chrome（你自己的 profile，已登录的账号都在）
+chrome --remote-debugging-port=9222
+```
+
 ```rust
 use rpage::WebPage;
 
 #[tokio::main]
 async fn main() -> rpage::Result<()> {
-    // 启动浏览器
-    let mut page = WebPage::new().await?;
+    // 接管已打开的浏览器 — 零自动化标记
+    let mut page = WebPage::connect("http://localhost:9222").await?;
     
-    // 导航
+    page.get("https://www.baidu.com").await?;
+    let search = page.ele("#kw").await?;
+    search.js("this.value = 'rust教程'; this.dispatchEvent(new Event('input', {bubbles: true}));").await?;
+    page.ele("#su").await?.click().await?;
+    
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let results = page.eles("h3").await?;
+    for r in &results {
+        println!("{}", r.text());
+    }
+    
+    Ok(())
+}
+```
+
+### 方式二：自动启动浏览器（内置 stealth 反检测）
+
+```rust
+use rpage::{ChromiumOptions, WebPage};
+
+#[tokio::main]
+async fn main() -> rpage::Result<()> {
+    let opts = ChromiumOptions::builder()
+        .headless(true)
+        .viewport(1280, 800)
+        .no_sandbox(true)
+        .build();
+    
+    let mut page = WebPage::with_options(
+        rpage::config::WebPageOptions::builder().chromium(opts).build()
+    ).await?;
+    
     page.get("https://example.com").await?;
-    
-    // 查找元素
     let heading = page.ele("h1").await?;
     println!("标题: {}", heading.text());
     
-    // 切换到 HTTP 模式（Cookie 自动同步）
-    page.to_session().await?;
-    page.get("https://example.com/api").await?;
+    Ok(())
+}
+```
+
+### 方式三：纯 HTTP 模式（无需浏览器）
+
+```rust
+use rpage::WebPage;
+
+fn main() -> rpage::Result<()> {
+    let mut page = WebPage::session_only(None)?;
+    
+    // 同步 HTTP 请求
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        page.get("https://httpbin.org/get").await?;
+        let elements = page.eles("p")?;
+        println!("找到 {} 个段落", elements.len());
+        Ok::<(), rpage::Error>(())
+    })?;
     
     Ok(())
 }
@@ -68,53 +122,6 @@ page.ele("text*=提交").await?         // 包含匹配
 // 属性匹配
 page.ele("@name=username").await?     // 属性等于
 page.ele("@href*=logout").await?      // 属性包含
-
-// 链式定位
-page.ele("tag:form@@text=提交").await?
-```
-
-## 🔧 Session 模式（纯 HTTP）
-
-```rust
-use rpage::SessionPage;
-
-fn main() -> rpage::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    let mut page = SessionPage::new()?;
-    
-    rt.block_on(async {
-        page.get("https://httpbin.org/get").await?;
-        let title = page.title();
-        let elements = page.eles("p")?;
-        println!("找到 {} 个段落", elements.len());
-        Ok::<(), rpage::Error>(())
-    })?;
-    
-    Ok(())
-}
-```
-
-## 🥷 Stealth 反检测
-
-```rust
-use rpage::stealth::{apply_stealth, StealthConfig, user_agents};
-use rpage::ChromiumPage;
-
-let page = ChromiumPage::new().await?;
-let config = StealthConfig::new()
-    .user_agent(user_agents::CHROME_WINDOWS)
-    .viewport(1920, 1080);
-apply_stealth(page.inner_page(), &config).await?;
-```
-
-## 📡 网络监控
-
-```rust
-use rpage::network::NetworkMonitor;
-
-let monitor = NetworkMonitor::new();
-monitor.record_request(/* ... */);
-let api_calls = monitor.find_requests_by_url("/api/");
 ```
 
 ## 🏗️ 架构
@@ -123,6 +130,7 @@ let api_calls = monitor.find_requests_by_url("/api/");
 ┌─────────────────────────────────────┐
 │              WebPage                 │
 │  (双模式统一入口 + Cookie 同步)      │
+│  connect() / new() / session_only() │
 ├──────────────┬──────────────────────┤
 │ ChromiumPage │    SessionPage       │
 │ (CDP 协议)   │  (reqwest HTTP)      │
@@ -147,8 +155,8 @@ cargo test
 | 版本 | 内容 |
 |------|------|
 | **v0.1** | ✅ 核心三对象 + Cookie 同步 + 定位器 + 等待 + Stealth + 网络监控 |
-| **v0.2** | 🔲 iframe 支持 + Cookie 双向增量同步 + 丰富 locator |
-| **v0.3** | 🔲 链式定位 + 智能等待增强 + 元素生命周期自动 re-resolve |
+| **v0.2** | ✅ Element 异步操作 + 接管已有浏览器 + 72 测试 |
+| **v0.3** | 🔲 iframe 支持 + 链式定位 + 智能等待增强 |
 | **v0.4** | 🔲 请求拦截 + 代理 + 下载管理增强 |
 | **v1.0** | 🔲 文档完善 + 跨平台测试 + API 冻结 |
 
