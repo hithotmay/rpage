@@ -83,6 +83,24 @@ impl WebPage {
         })
     }
 
+    /// **接管已打开的浏览器** — 零自动化标记，永不触发验证码。
+    ///
+    /// 步骤：
+    /// 1. 命令行启动 Chrome：`chrome --remote-debugging-port=9222`
+    /// 2. `WebPage::connect("http://localhost:9222")` 接管
+    pub async fn connect(debug_url: &str) -> Result<Self> {
+        let cookie_hub = Arc::new(CookieHub::new());
+        let session = SessionPage::with_cookie_hub(cookie_hub.clone(), SessionOptions::default())?;
+        let chromium = ChromiumPage::connect(debug_url).await?;
+        Ok(Self {
+            mode: PageMode::Chromium,
+            chromium: Some(chromium),
+            session,
+            cookie_hub,
+            opts: WebPageOptions::default(),
+        })
+    }
+
     // ── Mode ─────────────────────────────────────────────────
 
     pub fn mode(&self) -> PageMode {

@@ -61,6 +61,54 @@ impl ChromiumPage {
         Self::with_options(ChromiumOptions::default()).await
     }
 
+    /// **接管已打开的浏览器** — 零自动化标记，永远不会触发验证码。
+    ///
+    /// 用法：
+    /// 1. 先用命令行启动 Chrome（用你自己的 profile）：
+    ///    `chrome --remote-debugging-port=9222`
+    /// 2. 然后 `ChromiumPage::connect("http://localhost:9222")` 接管
+    ///
+    /// 因为浏览器是你手动打开的，没有任何 `--enable-automation`、
+    /// `HeadlessChrome` UA、`navigator.webdriver` 等标记，
+    /// 所有网站（包括百度）都不会触发验证码。
+    pub async fn connect(debug_url: &str) -> Result<Self> {
+        info!("Connecting to existing browser at {debug_url}");
+
+        let (browser, handler) = Browser::connect(debug_url)
+            .await
+            .map_err(|e| Error::Browser(format!("connect: {e}")))?;
+
+        tokio::spawn(async move {
+            let mut h = handler;
+            while h.next().await.is_some() {}
+        });
+
+        // Get the first existing page, or create one
+        let pages = browser
+            .pages()
+            .await
+            .map_err(|e| Error::Browser(format!("get pages: {e}")))?;
+
+        let page = if let Some(p) = pages.into_iter().next() {
+            info!("Reusing existing page");
+            p
+        } else {
+            info!("Creating new page");
+            browser
+                .new_page("about:blank")
+                .await
+                .map_err(|e| Error::Browser(format!("new page: {e}")))?
+        };
+
+        info!("Connected to existing browser — zero automation flags");
+        Ok(Self {
+            browser,
+            page,
+            opts: ChromiumOptions::default(),
+            download_manager: Arc::new(DownloadManager::new()),
+        })
+    }
+
     /// Launch with custom options.
     pub async fn with_options(opts: ChromiumOptions) -> Result<Self> {
         let mut cfg = BrowserConfig::builder();
