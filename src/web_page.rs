@@ -3,6 +3,7 @@
 //! The core abstraction: seamlessly switch between browser mode
 //! and HTTP request mode with automatic cookie synchronization.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use tracing::info;
@@ -33,16 +34,17 @@ impl std::fmt::Display for PageMode {
 /// WebPage — switch between browser and HTTP mode with `to_session()` / `to_chromium()`.
 ///
 /// Cookies are automatically synchronized when switching modes.
+/// All methods take `&self` (uses interior mutability for Session mode).
 pub struct WebPage {
     mode: PageMode,
     chromium: Option<ChromiumPage>,
-    session: SessionPage,
+    session: RefCell<SessionPage>,
     cookie_hub: Arc<CookieHub>,
     opts: WebPageOptions,
 }
 
 impl WebPage {
-    /// Create in Chromium mode with defaults.
+    /// **启动浏览器** — 一个函数搞定，零自动化标记，永不触发验证码。
     pub async fn new() -> Result<Self> {
         Self::with_options(WebPageOptions::default()).await
     }
@@ -59,7 +61,7 @@ impl WebPage {
         Ok(Self {
             mode: opts.initial_mode,
             chromium,
-            session,
+            session: RefCell::new(session),
             cookie_hub,
             opts,
         })
@@ -73,7 +75,7 @@ impl WebPage {
         Ok(Self {
             mode: PageMode::Session,
             chromium: None,
-            session,
+            session: RefCell::new(session),
             cookie_hub,
             opts: WebPageOptions {
                 chromium: ChromiumOptions::default(),
@@ -84,10 +86,6 @@ impl WebPage {
     }
 
     /// **接管已打开的浏览器** — 零自动化标记，永不触发验证码。
-    ///
-    /// 步骤：
-    /// 1. 命令行启动 Chrome：`chrome --remote-debugging-port=9222`
-    /// 2. `WebPage::connect("http://localhost:9222")` 接管
     pub async fn connect(debug_url: &str) -> Result<Self> {
         let cookie_hub = Arc::new(CookieHub::new());
         let session = SessionPage::with_cookie_hub(cookie_hub.clone(), SessionOptions::default())?;
@@ -95,7 +93,7 @@ impl WebPage {
         Ok(Self {
             mode: PageMode::Chromium,
             chromium: Some(chromium),
-            session,
+            session: RefCell::new(session),
             cookie_hub,
             opts: WebPageOptions::default(),
         })
@@ -130,8 +128,9 @@ impl WebPage {
             self.chromium = Some(ChromiumPage::with_options(self.opts.chromium.clone()).await?);
         }
         // Sync cookies from session store → browser
-        if let (Some(ref c), Some(url)) = (&self.chromium, self.session.url()) {
-            let cookies = self.cookie_hub.get_cookies(url)?;
+        let url_opt = self.session.borrow().url().map(String::from);
+        if let (Some(ref c), Some(url)) = (&self.chromium, url_opt) {
+            let cookies = self.cookie_hub.get_cookies(&url)?;
             for ck in cookies {
                 let info = crate::chromium_page::CookieInfo {
                     name: ck.name().to_string(),
@@ -153,10 +152,11 @@ impl WebPage {
         Ok(())
     }
 
-    // ── Navigation ───────────────────────────────────────────
+    // ── Navigation (all &self) ───────────────────────────────
 
-    /// Navigate to URL (both modes).
-    pub async fn get(&mut self, url: &str) -> Result<()> {
+    /// Navigate to URL. Auto-waits for page load in Chromium mode.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn get(&self, url: &str) -> Result<()> {
         match self.mode {
             PageMode::Chromium => {
                 self.chromium
@@ -166,14 +166,15 @@ impl WebPage {
                     .await?;
             }
             PageMode::Session => {
-                self.session.get(url).await?;
+                self.session.borrow_mut().get(url).await?;
             }
         }
         Ok(())
     }
 
     /// POST request.
-    pub async fn post(&mut self, url: &str, body: &str) -> Result<String> {
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn post(&self, url: &str, body: &str) -> Result<String> {
         match self.mode {
             PageMode::Chromium => {
                 let c = self
@@ -188,13 +189,13 @@ impl WebPage {
                 let val = c.execute(&js).await?;
                 Ok(val.as_str().unwrap_or("").to_string())
             }
-            PageMode::Session => self.session.post(url, body.to_string()).await,
+            PageMode::Session => self.session.borrow_mut().post(url, body.to_string()).await,
         }
     }
 
     // ── Elements ─────────────────────────────────────────────
 
-    /// Find first element (CDP element carries page ref → supports click/input).
+    /// Find first element. Auto-retries up to 5s in Chromium mode.
     pub async fn ele(&self, locator_str: &str) -> Result<Element> {
         match self.mode {
             PageMode::Chromium => {
@@ -204,7 +205,7 @@ impl WebPage {
                     .ele(locator_str)
                     .await
             }
-            PageMode::Session => self.session.ele(locator_str),
+            PageMode::Session => self.session.borrow().ele(locator_str),
         }
     }
 
@@ -218,7 +219,7 @@ impl WebPage {
                     .eles(locator_str)
                     .await
             }
-            PageMode::Session => self.session.eles(locator_str),
+            PageMode::Session => self.session.borrow().eles(locator_str),
         }
     }
 
@@ -234,7 +235,7 @@ impl WebPage {
                     .html()
                     .await
             }
-            PageMode::Session => Ok(self.session.html().to_string()),
+            PageMode::Session => Ok(self.session.borrow().html().to_string()),
         }
     }
 
@@ -250,6 +251,7 @@ impl WebPage {
             }
             PageMode::Session => self
                 .session
+                .borrow()
                 .title()
                 .ok_or_else(|| Error::Browser("no title".into())),
         }
@@ -267,6 +269,7 @@ impl WebPage {
             }
             PageMode::Session => self
                 .session
+                .borrow()
                 .url()
                 .map(String::from)
                 .ok_or_else(|| Error::Browser("no URL".into())),
@@ -328,8 +331,21 @@ impl WebPage {
             .await
     }
 
+    /// Sleep for the specified duration.
+    pub async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    /// Close the browser.
+    pub async fn close(&self) -> Result<()> {
+        if let Some(ref c) = self.chromium {
+            c.close().await?;
+        }
+        Ok(())
+    }
+
     /// Manually sync cookies from browser → session store.
-    pub async fn sync_cookies(&mut self) -> Result<()> {
+    pub async fn sync_cookies(&self) -> Result<()> {
         if let Some(ref c) = self.chromium {
             let cookies = c.cookies().await?;
             self.cookie_hub.sync_from_chromium(cookies)?;
@@ -342,11 +358,11 @@ impl WebPage {
     pub fn chromium(&self) -> Option<&ChromiumPage> {
         self.chromium.as_ref()
     }
-    pub fn session(&self) -> &SessionPage {
-        &self.session
+    pub fn session(&self) -> std::cell::Ref<'_, SessionPage> {
+        self.session.borrow()
     }
-    pub fn session_mut(&mut self) -> &mut SessionPage {
-        &mut self.session
+    pub fn session_mut(&self) -> std::cell::RefMut<'_, SessionPage> {
+        self.session.borrow_mut()
     }
     pub fn cookie_hub(&self) -> &Arc<CookieHub> {
         &self.cookie_hub

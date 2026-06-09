@@ -12,7 +12,7 @@ async fn main() -> rpage::Result<()> {
     println!("🔗 接管已打开的浏览器...");
     println!("   请确保 Chrome 已用 --remote-debugging-port=9222 启动\n");
 
-    let mut page = WebPage::connect("http://localhost:9222").await?;
+    let page = WebPage::connect("http://localhost:9222").await?;
 
     // ── 百度搜索（永不触发验证码，因为是你自己的浏览器）──
     println!("📡 导航到百度...");

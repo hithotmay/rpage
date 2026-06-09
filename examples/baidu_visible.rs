@@ -5,7 +5,7 @@ use rpage::WebPage;
 #[tokio::main]
 async fn main() -> rpage::Result<()> {
     println!("🚀 启动浏览器（非无头模式）...");
-    let mut page = WebPage::new().await?;
+    let page = WebPage::new().await?;
 
     println!("📡 导航到百度...");
     page.get("https://www.baidu.com").await?;

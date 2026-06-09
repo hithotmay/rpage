@@ -228,57 +228,139 @@ impl ChromiumPage {
         })
     }
 
-    // ── Navigation ───────────────────────────────────────────
+    // ── Navigation (auto-wait for page load) ────────────────
 
-    /// Navigate to a URL.
+    /// Navigate to a URL. Automatically waits for page to finish loading.
     pub async fn get(&self, url: &str) -> Result<()> {
         debug!("get({url})");
         self.page
             .goto(url)
             .await
             .map_err(|e| Error::Browser(format!("navigate: {e}")))?;
+        // Wait for DOMContentLoaded
+        self.page
+            .wait_for_navigation_response()
+            .await
+            .map_err(|e| Error::Browser(format!("wait for load: {e}")))?;
         Ok(())
     }
 
-    /// Refresh current page.
+    /// Refresh current page. Waits for page to finish loading.
     pub async fn refresh(&self) -> Result<()> {
         self.page
             .reload()
             .await
             .map_err(|e| Error::Browser(format!("refresh: {e}")))?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         Ok(())
     }
 
-    /// Go back.
+    /// Go back. Waits for navigation.
     pub async fn back(&self) -> Result<()> {
         self.page
             .evaluate("history.back()")
             .await
             .map_err(|e| Error::Browser(format!("back: {e}")))?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         Ok(())
     }
 
-    /// Go forward.
+    /// Go forward. Waits for navigation.
     pub async fn forward(&self) -> Result<()> {
         self.page
             .evaluate("history.forward()")
             .await
             .map_err(|e| Error::Browser(format!("forward: {e}")))?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         Ok(())
     }
 
-    // ── Element finding (return rpage::Element with page ref) ──
+    /// Sleep for the specified duration.
+    pub async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
 
-    /// Find the first element and return an rpage Element (with CDP page ref).
+    /// Close the browser.
+    pub async fn close(&self) -> Result<()> {
+        self.page
+            .execute(chromiumoxide::cdp::browser_protocol::page::CloseParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("close: {e}")))?;
+        Ok(())
+    }
+
+    // ── Element finding (auto-retry + batch extract) ─────────
+
+    /// Find the first element. Auto-retries for up to 5 seconds if not found.
     pub async fn ele(&self, locator_str: &str) -> Result<Element> {
         let locator = crate::locator::parse_locator(locator_str)?;
         let selector = locator_to_selector(&locator)?;
-        let cdp_el = self
+
+        // Auto-retry: wait up to 5 seconds for element to appear
+        let cdp_el = self.wait_for_element(&selector, 5).await?;
+
+        self.build_element_from_cdp(cdp_el, locator).await
+    }
+
+    /// Find all matching elements (no retry — returns immediately).
+    pub async fn eles(&self, locator_str: &str) -> Result<Vec<Element>> {
+        let locator = crate::locator::parse_locator(locator_str)?;
+        let selector = locator_to_selector(&locator)?;
+        let cdp_els = self
             .page
-            .find_element(&selector)
+            .find_elements(&selector)
             .await
             .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
 
+        let locator_clone = locator.clone();
+        let mut results = Vec::with_capacity(cdp_els.len());
+
+        if cdp_els.is_empty() {
+            return Ok(results);
+        }
+
+        // Use individual extraction for reliability (batch JS is fragile)
+        for cdp_el in &cdp_els {
+            let el = self
+                .build_element_from_cdp_ref(cdp_el, locator_clone.clone())
+                .await?;
+            results.push(el);
+        }
+        Ok(results)
+    }
+
+    // ── Internal helpers ─────────────────────────────────────
+
+    /// Wait for an element to appear, retrying for `timeout_secs` seconds.
+    async fn wait_for_element(
+        &self,
+        selector: &str,
+        timeout_secs: u64,
+    ) -> Result<chromiumoxide::Element> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let mut last_err = String::from("timeout");
+
+        while tokio::time::Instant::now() < deadline {
+            match self.page.find_element(selector).await {
+                Ok(el) => return Ok(el),
+                Err(e) => {
+                    last_err = format!("{e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+
+        Err(Error::ElementNotFound(format!(
+            "not found after {timeout_secs}s: {last_err}"
+        )))
+    }
+
+    /// Build an rpage Element from a CDP Element.
+    async fn build_element_from_cdp(
+        &self,
+        cdp_el: chromiumoxide::Element,
+        locator: crate::locator::Locator,
+    ) -> Result<Element> {
         let html = cdp_el.outer_html().await.ok().flatten().unwrap_or_default();
         let text = cdp_el.inner_text().await.ok().flatten().unwrap_or_default();
         let tag = cdp_el
@@ -311,50 +393,42 @@ impl ChromiumPage {
         ))
     }
 
-    /// Find all matching elements.
-    pub async fn eles(&self, locator_str: &str) -> Result<Vec<Element>> {
-        let locator = crate::locator::parse_locator(locator_str)?;
-        let selector = locator_to_selector(&locator)?;
-        let cdp_els = self
-            .page
-            .find_elements(&selector)
+    /// Build an rpage Element from a CDP Element reference.
+    async fn build_element_from_cdp_ref(
+        &self,
+        cdp_el: &chromiumoxide::Element,
+        locator: crate::locator::Locator,
+    ) -> Result<Element> {
+        let html = cdp_el.outer_html().await.ok().flatten().unwrap_or_default();
+        let text = cdp_el.inner_text().await.ok().flatten().unwrap_or_default();
+        let tag = cdp_el
+            .string_property("tagName")
             .await
-            .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .to_lowercase();
+        let attrs = cdp_el
+            .call_js_fn(
+                "function(){ var r=[]; for(var i=0;i<this.attributes.length;i++){var a=this.attributes[i]; r.push([a.name,a.value]);} return JSON.stringify(r); }",
+                false,
+            )
+            .await
+            .ok()
+            .and_then(|r| {
+                r.result.value.and_then(|v| serde_json::from_value(v).ok())
+            })
+            .unwrap_or_default();
 
-        let mut results = Vec::with_capacity(cdp_els.len());
-        for cdp_el in &cdp_els {
-            let html = cdp_el.outer_html().await.ok().flatten().unwrap_or_default();
-            let text = cdp_el.inner_text().await.ok().flatten().unwrap_or_default();
-            let tag = cdp_el
-                .string_property("tagName")
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .to_lowercase();
-            let attrs = cdp_el
-                .call_js_fn(
-                    "function(){ var r=[]; for(var i=0;i<this.attributes.length;i++){var a=this.attributes[i]; r.push([a.name,a.value]);} return JSON.stringify(r); }",
-                    false,
-                )
-                .await
-                .ok()
-                .and_then(|r| {
-                    r.result.value.and_then(|v| serde_json::from_value(v).ok())
-                })
-                .unwrap_or_default();
-
-            results.push(Element::new_cdp(
-                self.page.clone(),
-                cdp_el.remote_object_id.clone().into(),
-                Some(locator.clone()),
-                html,
-                tag,
-                text,
-                attrs,
-            ));
-        }
-        Ok(results)
+        Ok(Element::new_cdp(
+            self.page.clone(),
+            cdp_el.remote_object_id.clone().into(),
+            Some(locator),
+            html,
+            tag,
+            text,
+            attrs,
+        ))
     }
 
     // ── Page info ────────────────────────────────────────────

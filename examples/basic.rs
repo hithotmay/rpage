@@ -3,7 +3,7 @@ use rpage::WebPage;
 
 #[tokio::main]
 async fn main() -> rpage::Result<()> {
-    let mut page = WebPage::new().await?;
+    let page = WebPage::new().await?;
     page.get("https://example.com").await?;
 
     let title = page.title().await?;

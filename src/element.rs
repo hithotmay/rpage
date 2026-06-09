@@ -135,7 +135,9 @@ impl Element {
 
     /// True if element has non-hidden style.
     pub fn is_displayed(&self) -> bool {
-        !self.html.contains("display:none") && !self.html.contains("display: none")
+        !self.html.contains("display:none")
+            && !self.html.contains("display: none")
+            && !self.html.contains("hidden")
     }
 
     /// True if not disabled.
@@ -148,27 +150,161 @@ impl Element {
         self.locator.as_ref()
     }
 
-    // ── Async interactions (CDP only) ────────────────────────
+    // ── Internal: get CDP element by re-resolving ────────────
 
-    /// Click this element.
-    pub async fn click(&self) -> Result<()> {
-        self.js("this.click()").await
+    /// Re-resolve this element in the live page via its locator.
+    async fn cdp_element(&self) -> Result<chromiumoxide::Element> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        let locator = self
+            .locator
+            .as_ref()
+            .ok_or(Error::Browser("no locator for element".into()))?;
+        let selector = locator_to_query(locator)?;
+        page.find_element(&selector)
+            .await
+            .map_err(|e| Error::Browser(format!("re-resolve element: {e}")))
     }
 
-    /// Type text into this element (appends to existing value).
+    // ── Async interactions (CDP only) ────────────────────────
+
+    /// Click this element. Falls back to JS click if CDP click fails.
+    pub async fn click(&self) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        // Try scroll + CDP click first
+        if cdp_el.scroll_into_view().await.is_ok() && cdp_el.click().await.is_ok() {
+            return Ok(());
+        }
+        // Fallback: JS click — works even when element is "not visible" to CDP
+        self.js("this.click()").await?;
+        Ok(())
+    }
+
+    /// Type text into this element using CDP Input.insertText.
+    /// Supports Chinese and all Unicode characters.
+    /// Appends to existing value.
     pub async fn input(&self, text: &str) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+        cdp_el
+            .click()
+            .await
+            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
+        cdp_el
+            .type_str(text)
+            .await
+            .map_err(|e| Error::Browser(format!("type: {e}")))?;
+        Ok(())
+    }
+
+    /// Clear the value and type new text (清空后输入).
+    /// This is the most common operation for form fields.
+    pub async fn fill(&self, text: &str) -> Result<()> {
+        // Use JS directly — most reliable, works with all characters including Chinese
         let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
-        self.js(&format!(
-            "(function(){{ this.focus(); this.value += '{}'; this.dispatchEvent(new Event('input',{{bubbles:true}})); this.dispatchEvent(new Event('change',{{bubbles:true}})); }})()",
+        let js = format!(
+            "(function() {{ \
+               this.focus(); \
+               var nativeInputValueSetter = Object.getOwnPropertyDescriptor(\
+                 window.HTMLInputElement.prototype, 'value').set;\
+               nativeInputValueSetter.call(this, '{}'); \
+               this.dispatchEvent(new Event('input', {{bubbles: true}})); \
+               this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+             }}).call(this);",
             escaped
-        )).await
+        );
+        self.js(&js).await?;
+        Ok(())
     }
 
     /// Clear the value of this element.
     pub async fn clear(&self) -> Result<()> {
-        self.js(
-            "(function(){ this.value=''; this.dispatchEvent(new Event('input',{bubbles:true})); })()"
-        ).await
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .click()
+            .await
+            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
+        // Ctrl+A then Delete
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        let select_all = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key("a")
+            .code("KeyA")
+            .windows_virtual_key_code(0x41)
+            .modifiers(2)
+            .build()
+            .unwrap();
+        page.execute(select_all)
+            .await
+            .map_err(|e| Error::Browser(format!("select all: {e}")))?;
+        let del = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key("Delete")
+            .code("Delete")
+            .windows_virtual_key_code(0x2E)
+            .build()
+            .unwrap();
+        page.execute(del)
+            .await
+            .map_err(|e| Error::Browser(format!("delete: {e}")))?;
+        Ok(())
+    }
+
+    /// Hover over this element (move mouse to element center).
+    pub async fn hover(&self) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+        cdp_el
+            .hover()
+            .await
+            .map_err(|e| Error::Browser(format!("hover: {e}")))?;
+        Ok(())
+    }
+
+    /// Scroll this element into view.
+    pub async fn scroll_into_view(&self) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+        Ok(())
+    }
+
+    /// Press a keyboard key (e.g. "Enter", "Tab", "Escape").
+    pub async fn press_key(&self, key: &str) -> Result<()> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        let cdp_el = self.cdp_element().await?;
+        // Focus the element first
+        cdp_el
+            .click()
+            .await
+            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
+        // Press the key
+        cdp_el
+            .press_key(key)
+            .await
+            .map_err(|e| Error::Browser(format!("press_key: {e}")))?;
+        // Just consume the page reference to avoid unused warning
+        let _ = page;
+        Ok(())
     }
 
     /// Execute JavaScript with `this` bound to this element.
@@ -186,7 +322,7 @@ impl Element {
 
         let wrapped = format!(
             "(function(){{ var el = document.querySelector('{}'); if(!el) return; (function(){{ {} }}).call(el); }})()",
-            selector.replace('"', "\\\"").replace('\'', "\\'"),
+            selector.replace('\\', "\\\\").replace('\'', "\\'"),
             script,
         );
         page.evaluate(wrapped.as_str())
