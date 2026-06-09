@@ -4,9 +4,10 @@
 //! by default to avoid bot-detection.
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
-use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::network::CookieParam;
 use chromiumoxide::Page;
 use futures::StreamExt;
@@ -56,9 +57,127 @@ pub struct ChromiumPage {
 }
 
 impl ChromiumPage {
-    /// Launch with default options (headed, stealth enabled).
+    /// **启动浏览器并接管** — 一个函数搞定，零自动化标记，永不触发验证码。
+    ///
+    /// 内部流程：
+    /// 1. 自动检测系统 Chrome 路径
+    /// 2. 用 `Command` 启动 Chrome（只传 `--remote-debugging-port`）
+    /// 3. 等待调试端口就绪
+    /// 4. 通过 CDP 连接接管
+    ///
+    /// 因为不走 chromiumoxide 的 `Browser::launch`（它会加 `--enable-automation` 等
+    /// 默认参数），所以浏览器没有任何自动化标记，和用户手动打开的完全一样。
     pub async fn new() -> Result<Self> {
-        Self::with_options(ChromiumOptions::default()).await
+        let chrome_path = find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?;
+        // Use a dedicated user-data-dir to avoid conflicts with running Chrome
+        let ud = std::env::temp_dir().join("rpage-chrome");
+        Self::launch_and_connect(&chrome_path, Some(&ud), 9222, &[]).await
+    }
+
+    /// 用自定义选项启动浏览器。
+    pub async fn with_options(opts: ChromiumOptions) -> Result<Self> {
+        let chrome_path = if let Some(ref path) = opts.browser_path {
+            path.clone()
+        } else {
+            find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?
+        };
+
+        let user_data_dir = opts
+            .user_data_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("rpage-chrome"));
+        let port = opts.debug_port;
+        let extra_args = opts.extra_args.clone();
+        let page =
+            Self::launch_and_connect(&chrome_path, Some(&user_data_dir), port, &extra_args).await?;
+
+        // Apply viewport
+        if opts.viewport.width > 0 && opts.viewport.height > 0 {
+            let js = format!(
+                "window.resizeTo({}, {})",
+                opts.viewport.width, opts.viewport.height
+            );
+            page.execute(&js).await.ok();
+        }
+
+        Ok(page)
+    }
+    async fn launch_and_connect(
+        chrome_path: &PathBuf,
+        user_data_dir: Option<&PathBuf>,
+        port: u16,
+        extra_args: &[String],
+    ) -> Result<Self> {
+        let debug_url = format!("http://localhost:{port}");
+
+        // Check if a browser is already listening on this port
+        let already_running = reqwest::get(format!("{debug_url}/json/version"))
+            .await
+            .is_ok();
+
+        if !already_running {
+            info!(
+                "Launching Chrome at {} (port {port})",
+                chrome_path.display()
+            );
+
+            let mut cmd = Command::new(chrome_path);
+            cmd.arg(format!("--remote-debugging-port={port}"));
+
+            if let Some(ud) = user_data_dir {
+                cmd.arg(format!("--user-data-dir={}", ud.display()));
+            } else {
+                // Chrome requires non-default data dir for remote debugging
+                let tmp = std::env::temp_dir().join("rpage-chrome");
+                cmd.arg(format!("--user-data-dir={}", tmp.display()));
+            }
+
+            for arg in extra_args {
+                cmd.arg(arg);
+            }
+
+            // Windows: create process without console window
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+
+            cmd.spawn()
+                .map_err(|e| Error::Browser(format!("spawn Chrome: {e}")))?;
+
+            // Wait for debug port to be ready
+            Self::wait_for_port(debug_url.clone()).await?;
+        } else {
+            info!("Browser already running on port {port}, reusing");
+        }
+
+        // Connect via CDP
+        Self::connect(&debug_url).await
+    }
+
+    /// Poll the debug port until Chrome is ready (max 10s).
+    async fn wait_for_port(debug_url: String) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .map_err(|e| Error::Browser(format!("http client: {e}")))?;
+
+        for _ in 0..50 {
+            if client
+                .get(format!("{debug_url}/json/version"))
+                .send()
+                .await
+                .is_ok()
+            {
+                info!("Chrome debug port ready");
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Err(Error::Browser(
+            "Chrome debug port not ready after 10s".into(),
+        ))
     }
 
     /// **接管已打开的浏览器** — 零自动化标记，永远不会触发验证码。
@@ -105,112 +224,6 @@ impl ChromiumPage {
             browser,
             page,
             opts: ChromiumOptions::default(),
-            download_manager: Arc::new(DownloadManager::new()),
-        })
-    }
-
-    /// Launch with custom options.
-    pub async fn with_options(opts: ChromiumOptions) -> Result<Self> {
-        let mut cfg = BrowserConfig::builder();
-
-        // Auto-detect Chrome if not specified
-        if let Some(ref path) = opts.browser_path {
-            cfg = cfg.chrome_executable(path);
-        } else if let Some(chrome) = find_chrome() {
-            info!("Auto-detected Chrome at {}", chrome.display());
-            cfg = cfg.chrome_executable(chrome);
-        }
-
-        if opts.no_sandbox {
-            cfg = cfg.no_sandbox();
-        }
-        if let Some(ref ud) = opts.user_data_dir {
-            cfg = cfg.user_data_dir(ud);
-        }
-        if !opts.user_agent.is_empty() {
-            cfg = cfg.arg(format!("--user-agent={}", opts.user_agent));
-        }
-        for a in &opts.extra_args {
-            cfg = cfg.arg(a.as_str());
-        }
-
-        // Stealth: disable automation flag
-        cfg = cfg.arg("--disable-blink-features=AutomationControlled");
-
-        cfg = cfg.window_size(opts.viewport.width, opts.viewport.height);
-
-        if opts.headless {
-            // --headless=new doesn't expose "HeadlessChrome" in UA
-            cfg = cfg.new_headless_mode();
-            // Extra safety: override UA to remove "HeadlessChrome"
-            cfg = cfg.arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
-        } else {
-            cfg = cfg.with_head();
-        }
-
-        if opts.disable_gpu {
-            cfg = cfg.arg("--disable-gpu");
-        }
-
-        let config = cfg
-            .build()
-            .map_err(|e| Error::Browser(format!("build config: {e}")))?;
-
-        let (browser, handler) = Browser::launch(config)
-            .await
-            .map_err(|e| Error::Browser(format!("launch: {e}")))?;
-
-        tokio::spawn(async move {
-            let mut h = handler;
-            while h.next().await.is_some() {}
-        });
-
-        let page = browser
-            .new_page("about:blank")
-            .await
-            .map_err(|e| Error::Browser(format!("new page: {e}")))?;
-
-        // Stealth: inject anti-detection JS.
-        // 1) evaluate() on about:blank so it takes effect immediately
-        // 2) evaluate_on_new_document() so it runs before every future navigation
-        let stealth_js = r#"
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-            Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en']});
-            window.chrome = { runtime: {} };
-            const origQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    origQuery(parameters)
-            );
-        "#;
-        // Run immediately on about:blank
-        if let Err(e) = page.evaluate(stealth_js).await {
-            debug!("stealth evaluate failed: {e:?}");
-        }
-        // Also register for every new document load
-        if let Err(e) = page.evaluate_on_new_document(stealth_js).await {
-            debug!("stealth on-new-doc failed: {e:?}");
-        }
-
-        // Override User-Agent to remove "HeadlessChrome" marker
-        if opts.headless {
-            let ua = if opts.user_agent.is_empty() {
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            } else {
-                &opts.user_agent
-            };
-            if let Err(e) = page.set_user_agent(ua).await {
-                debug!("set_user_agent failed: {e:?}");
-            }
-        }
-
-        info!("ChromiumPage ready");
-        Ok(Self {
-            browser,
-            page,
-            opts,
             download_manager: Arc::new(DownloadManager::new()),
         })
     }

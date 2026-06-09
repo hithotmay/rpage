@@ -47,6 +47,8 @@ pub struct ChromiumOptions {
     pub no_sandbox: bool,
     /// Additional Chrome arguments
     pub extra_args: Vec<String>,
+    /// Debug port for CDP connection (default: 9222)
+    pub debug_port: u16,
 }
 
 impl Default for ChromiumOptions {
@@ -63,6 +65,7 @@ impl Default for ChromiumOptions {
             disable_gpu: true,
             no_sandbox: false,
             extra_args: Vec::new(),
+            debug_port: 9222,
         }
     }
 }
