@@ -71,7 +71,9 @@ impl ChromiumPage {
         let chrome_path = find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?;
         // Use a dedicated user-data-dir to avoid conflicts with running Chrome
         let ud = std::env::temp_dir().join("rpage-chrome");
-        Self::launch_and_connect(&chrome_path, Some(&ud), 9222, &[]).await
+        // Use PID-based port to avoid multi-instance conflicts
+        let port = 9300 + ((std::process::id() as u16) % 700);
+        Self::launch_and_connect(&chrome_path, Some(&ud), port, &[], true, None).await
     }
 
     /// 用自定义选项启动浏览器。
@@ -88,8 +90,19 @@ impl ChromiumPage {
             .unwrap_or_else(|| std::env::temp_dir().join("rpage-chrome"));
         let port = opts.debug_port;
         let extra_args = opts.extra_args.clone();
-        let page =
-            Self::launch_and_connect(&chrome_path, Some(&user_data_dir), port, &extra_args).await?;
+        let headless = opts.headless;
+        let proxy = opts.proxy.clone();
+        let user_agent = opts.user_agent.clone();
+
+        let page = Self::launch_and_connect(
+            &chrome_path,
+            Some(&user_data_dir),
+            port,
+            &extra_args,
+            headless,
+            proxy.as_deref(),
+        )
+        .await?;
 
         // Apply viewport
         if opts.viewport.width > 0 && opts.viewport.height > 0 {
@@ -97,7 +110,12 @@ impl ChromiumPage {
                 "window.resizeTo({}, {})",
                 opts.viewport.width, opts.viewport.height
             );
-            page.execute(&js).await.ok();
+            page.page.evaluate(js.as_str()).await.ok();
+        }
+
+        // Apply user-agent if specified
+        if !user_agent.is_empty() {
+            crate::network::set_user_agent(&page.page, &user_agent).await?;
         }
 
         Ok(page)
@@ -107,6 +125,8 @@ impl ChromiumPage {
         user_data_dir: Option<&PathBuf>,
         port: u16,
         extra_args: &[String],
+        headless: bool,
+        proxy: Option<&str>,
     ) -> Result<Self> {
         let debug_url = format!("http://localhost:{port}");
 
@@ -130,6 +150,16 @@ impl ChromiumPage {
                 // Chrome requires non-default data dir for remote debugging
                 let tmp = std::env::temp_dir().join("rpage-chrome");
                 cmd.arg(format!("--user-data-dir={}", tmp.display()));
+            }
+
+            // Apply headless mode
+            if headless {
+                cmd.arg("--headless=new");
+            }
+
+            // Apply proxy
+            if let Some(proxy_url) = proxy {
+                cmd.arg(format!("--proxy-server={proxy_url}"));
             }
 
             for arg in extra_args {
@@ -558,6 +588,139 @@ impl ChromiumPage {
             .new_page("about:blank")
             .await
             .map_err(|e| Error::Browser(format!("new tab: {e}")))
+    }
+
+    // ── Browser lifecycle ───────────────────────────────────
+
+    /// Quit the browser entirely (kills Chrome process).
+    pub async fn quit(&self) -> Result<()> {
+        // Use CDP Browser.close to gracefully shut down
+        use chromiumoxide::cdp::browser_protocol::browser::CloseParams;
+        self.page
+            .execute(CloseParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("quit: {e}")))?;
+        Ok(())
+    }
+
+    // ── Scroll ──────────────────────────────────────────────
+
+    /// Scroll the page to absolute position.
+    pub async fn scroll_to(&self, x: u32, y: u32) -> Result<()> {
+        self.page
+            .evaluate(format!("window.scrollTo({x}, {y})"))
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+        Ok(())
+    }
+
+    /// Scroll to the top of the page.
+    pub async fn scroll_to_top(&self) -> Result<()> {
+        self.scroll_to(0, 0).await
+    }
+
+    /// Scroll to the bottom of the page.
+    pub async fn scroll_to_bottom(&self) -> Result<()> {
+        let js = "window.scrollTo(0, document.body.scrollHeight)";
+        self.page
+            .evaluate(js)
+            .await
+            .map_err(|e| Error::Browser(format!("scroll bottom: {e}")))?;
+        Ok(())
+    }
+
+    /// Scroll up by `pixels`.
+    pub async fn scroll_up(&self, pixels: u32) -> Result<()> {
+        let js = format!("window.scrollBy(0, -{pixels})");
+        self.page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("scroll up: {e}")))?;
+        Ok(())
+    }
+
+    /// Scroll down by `pixels`.
+    pub async fn scroll_down(&self, pixels: u32) -> Result<()> {
+        let js = format!("window.scrollBy(0, {pixels})");
+        self.page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("scroll down: {e}")))?;
+        Ok(())
+    }
+
+    // ── Dialog / Alert ─────────────────────────────────────
+
+    /// Handle a JavaScript dialog (alert/confirm/prompt).
+    /// `accept`: true = accept (OK), false = dismiss (Cancel)
+    /// `text`: prompt text to enter (only for prompt dialogs)
+    pub async fn handle_alert(&self, accept: bool, text: Option<&str>) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::page::HandleJavaScriptDialogParams;
+        let mut params = HandleJavaScriptDialogParams::new(accept);
+        if let Some(t) = text {
+            params.prompt_text = Some(t.into());
+        }
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("handle dialog: {e}")))?;
+        Ok(())
+    }
+
+    // ── Frames ──────────────────────────────────────────────
+
+    /// Get the HTML content of an iframe identified by CSS selector.
+    pub async fn frame_html(&self, selector: &str) -> Result<String> {
+        let js = format!(
+            "document.querySelector('{sel}').contentDocument.documentElement.outerHTML",
+            sel = selector.replace('\'', "\\'")
+        );
+        self.page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("frame html: {e}")))?
+            .value()
+            .cloned()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .ok_or_else(|| Error::Browser("frame html: no result".into()))
+    }
+
+    /// Execute JavaScript inside an iframe identified by CSS selector.
+    pub async fn frame_execute(&self, selector: &str, js_code: &str) -> Result<serde_json::Value> {
+        let js = format!(
+            "(function(){{ var f = document.querySelector('{sel}'); if(!f) return null; return (function(){{ {code} }}).call(f.contentWindow); }})()",
+            sel = selector.replace('\'', "\\'"),
+            code = js_code.replace('\'', "\\'")
+        );
+        let r = self
+            .page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("frame execute: {e}")))?;
+        Ok(r.value().cloned().unwrap_or(serde_json::Value::Null))
+    }
+
+    // ── Cookie management ───────────────────────────────────
+
+    /// Delete a cookie by name.
+    pub async fn delete_cookie(&self, name: &str) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams;
+        let params = DeleteCookiesParams::new(name);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("delete cookie: {e}")))?;
+        Ok(())
+    }
+
+    /// Clear all cookies for the current page.
+    pub async fn clear_cookies(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::network::ClearBrowserCookiesParams;
+        self.page
+            .execute(ClearBrowserCookiesParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("clear cookies: {e}")))?;
+        Ok(())
     }
 
     // ── Accessors ────────────────────────────────────────────

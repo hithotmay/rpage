@@ -45,8 +45,18 @@ pub struct WebPage {
 
 impl WebPage {
     /// **启动浏览器** — 一个函数搞定，零自动化标记，永不触发验证码。
+    /// Uses a random port to avoid multi-instance conflicts.
     pub async fn new() -> Result<Self> {
-        Self::with_options(WebPageOptions::default()).await
+        let cookie_hub = Arc::new(CookieHub::new());
+        let session = SessionPage::with_cookie_hub(cookie_hub.clone(), SessionOptions::default())?;
+        let chromium = ChromiumPage::new().await?;
+        Ok(Self {
+            mode: PageMode::Chromium,
+            chromium: Some(chromium),
+            session: RefCell::new(session),
+            cookie_hub,
+            opts: WebPageOptions::default(),
+        })
     }
 
     /// Create with custom options.
@@ -351,6 +361,161 @@ impl WebPage {
             self.cookie_hub.sync_from_chromium(cookies)?;
         }
         Ok(())
+    }
+
+    // ── Browser lifecycle ────────────────────────────────────
+
+    /// Quit the browser entirely.
+    pub async fn quit(&self) -> Result<()> {
+        if let Some(ref c) = self.chromium {
+            c.quit().await?;
+        }
+        Ok(())
+    }
+
+    // ── Scroll ────────────────────────────────────────────────
+
+    /// Scroll page to absolute position.
+    pub async fn scroll_to(&self, x: u32, y: u32) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll requires Chromium mode".into()))?
+            .scroll_to(x, y)
+            .await
+    }
+
+    /// Scroll to page top.
+    pub async fn scroll_to_top(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll requires Chromium mode".into()))?
+            .scroll_to_top()
+            .await
+    }
+
+    /// Scroll to page bottom.
+    pub async fn scroll_to_bottom(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll requires Chromium mode".into()))?
+            .scroll_to_bottom()
+            .await
+    }
+
+    /// Scroll down by pixels.
+    pub async fn scroll_down(&self, pixels: u32) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll requires Chromium mode".into()))?
+            .scroll_down(pixels)
+            .await
+    }
+
+    /// Scroll up by pixels.
+    pub async fn scroll_up(&self, pixels: u32) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll requires Chromium mode".into()))?
+            .scroll_up(pixels)
+            .await
+    }
+
+    // ── Dialog / Alert ────────────────────────────────────────
+
+    /// Handle a JavaScript dialog (alert/confirm/prompt).
+    pub async fn handle_alert(&self, accept: bool, text: Option<&str>) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("handle_alert requires Chromium mode".into()))?
+            .handle_alert(accept, text)
+            .await
+    }
+
+    // ── Frames ────────────────────────────────────────────────
+
+    /// Read an iframe's HTML content.
+    pub async fn frame_html(&self, selector: &str) -> Result<String> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("frame_html requires Chromium mode".into()))?
+            .frame_html(selector)
+            .await
+    }
+
+    /// Execute JS in an iframe context.
+    pub async fn frame_execute(&self, selector: &str, js: &str) -> Result<serde_json::Value> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("frame_execute requires Chromium mode".into()))?
+            .frame_execute(selector, js)
+            .await
+    }
+
+    // ── Cookie management ─────────────────────────────────────
+
+    /// Delete a cookie by name.
+    pub async fn delete_cookie(&self, name: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("delete_cookie requires Chromium mode".into()))?
+            .delete_cookie(name)
+            .await
+    }
+
+    /// Clear all cookies.
+    pub async fn clear_cookies(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("clear_cookies requires Chromium mode".into()))?
+            .clear_cookies()
+            .await
+    }
+
+    // ── Cookies (read/set already exist, add tabs) ────────────
+
+    /// Get all open tabs.
+    pub async fn tabs(&self) -> Result<Vec<chromiumoxide::Page>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("tabs requires Chromium mode".into()))?
+            .tabs()
+            .await
+    }
+
+    /// Open a new tab.
+    pub async fn new_tab(&self) -> Result<chromiumoxide::Page> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("new_tab requires Chromium mode".into()))?
+            .new_tab()
+            .await
+    }
+
+    /// Set a cookie.
+    pub async fn set_cookie(&self, cookie: crate::chromium_page::CookieInfo) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_cookie requires Chromium mode".into()))?
+            .set_cookie(cookie)
+            .await
+    }
+
+    /// Get all cookies.
+    pub async fn cookies(&self) -> Result<Vec<crate::chromium_page::CookieInfo>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("cookies requires Chromium mode".into()))?
+            .cookies()
+            .await
+    }
+
+    /// Evaluate JS on every new document.
+    pub async fn evaluate_on_new_document(&self, js: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?
+            .evaluate_on_new_document(js)
+            .await
     }
 
     // ── Accessors ────────────────────────────────────────────

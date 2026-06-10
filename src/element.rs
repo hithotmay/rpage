@@ -204,17 +204,26 @@ impl Element {
 
     /// Clear the value and type new text (清空后输入).
     /// This is the most common operation for form fields.
+    /// Supports both `<input>` and `<textarea>` elements.
     pub async fn fill(&self, text: &str) -> Result<()> {
-        // Use JS directly — most reliable, works with all characters including Chinese
+        // Use JS directly — most reliable, works with all characters including Chinese.
+        // Use the element's own prototype chain so it works for both input and textarea.
         let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
         let js = format!(
             "(function() {{ \
                this.focus(); \
-               var nativeInputValueSetter = Object.getOwnPropertyDescriptor(\
-                 window.HTMLInputElement.prototype, 'value').set;\
-               nativeInputValueSetter.call(this, '{}'); \
-               this.dispatchEvent(new Event('input', {{bubbles: true}})); \
-               this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+               var proto = Object.getPrototypeOf(this); \
+               var desc = null; \
+               while (proto) {{ \
+                 desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
+                 if (desc) break; \
+                 proto = Object.getPrototypeOf(proto); \
+               }} \
+               if (desc && desc.set) {{ \
+                 desc.set.call(this, '{}'); \
+                 this.dispatchEvent(new Event('input', {{bubbles: true}})); \
+                 this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+               }} \
              }}).call(this);",
             escaped
         );
@@ -307,6 +316,215 @@ impl Element {
         Ok(())
     }
 
+    /// Get the current value of input/textarea/select elements.
+    pub async fn value(&self) -> Result<String> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .string_property("value")
+            .await
+            .map(|v| v.unwrap_or_default())
+            .map_err(|e| Error::Browser(format!("value: {e}")))
+    }
+
+    /// Get the element's bounding rectangle (x, y, width, height).
+    pub async fn rect(&self) -> Result<(f64, f64, f64, f64)> {
+        let cdp_el = self.cdp_element().await?;
+        let bb = cdp_el
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("bounding_box: {e}")))?;
+        Ok((bb.x, bb.y, bb.width, bb.height))
+    }
+
+    /// Whether this element is selected (checkbox/radio/option).
+    pub async fn is_selected(&self) -> Result<bool> {
+        let cdp_el = self.cdp_element().await?;
+        Ok(cdp_el
+            .string_property("checked")
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+            || cdp_el
+                .string_property("selected")
+                .await
+                .ok()
+                .flatten()
+                .is_some())
+    }
+
+    /// Get a computed CSS property value.
+    pub async fn style(&self, property: &str) -> Result<String> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let function_decl = format!(
+                    "function() {{ return getComputedStyle(this).getPropertyValue('{}'); }}",
+                    property.replace('\'', "\\'")
+                );
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(function_decl)
+                    .await_promise(false)
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build: {e}")))?;
+                let result = page
+                    .execute(params)
+                    .await
+                    .map_err(|e| Error::Browser(format!("style: {e}")))?;
+                if let Some(val) = result.result.result.value {
+                    Ok(val.as_str().unwrap_or("").to_string())
+                } else {
+                    Ok(String::new())
+                }
+            } else {
+                Ok(String::new())
+            }
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Select an option in a `<select>` element by visible text.
+    pub async fn select(&self, text: &str) -> Result<()> {
+        let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+        let js = format!(
+            "(function() {{ \
+               var opts = this.options; \
+               for (var i = 0; i < opts.length; i++) {{ \
+                 if (opts[i].text === '{}') {{ \
+                   this.selectedIndex = i; \
+                   opts[i].selected = true; \
+                   this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+                   return; \
+                 }} \
+               }} \
+             }}).call(this);",
+            escaped
+        );
+        self.js(&js).await
+    }
+
+    /// Select an option by its value attribute.
+    pub async fn select_by_value(&self, value: &str) -> Result<()> {
+        let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+        let js = format!(
+            "(function() {{ \
+               var opts = this.options; \
+               for (var i = 0; i < opts.length; i++) {{ \
+                 if (opts[i].value === '{}') {{ \
+                   this.selectedIndex = i; \
+                   opts[i].selected = true; \
+                   this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+                   return; \
+                 }} \
+               }} \
+             }}).call(this);",
+            escaped
+        );
+        self.js(&js).await
+    }
+
+    /// Upload a file to an `<input type="file">` element.
+    pub async fn upload_file(&self, path: &str) -> Result<()> {
+        let escaped = path.replace('\\', "\\\\").replace('\'', "\\'");
+        let js = format!(
+            "(function() {{ \
+               var input = this; \
+               var dt = new DataTransfer(); \
+               dt.items.add(new File([''], '{}')); \
+               input.files = dt.files; \
+               input.dispatchEvent(new Event('change', {{bubbles: true}})); \
+             }}).call(this);",
+            escaped
+        );
+        self.js(&js).await
+    }
+
+    /// Submit the form this element belongs to.
+    pub async fn submit(&self) -> Result<()> {
+        self.js("this.form ? this.form.submit() : this.submit()")
+            .await
+    }
+
+    /// Set an attribute on this element.
+    pub async fn set_attr(&self, name: &str, value: &str) -> Result<()> {
+        let escaped_name = name.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped_value = value.replace('\\', "\\\\").replace('\'', "\\'");
+        let js = format!("this.setAttribute('{}', '{}')", escaped_name, escaped_value);
+        self.js(&js).await
+    }
+
+    /// Get the parent element.
+    pub async fn parent(&self) -> Result<Element> {
+        self.js_element("this.parentElement").await
+    }
+
+    /// Get the first child element.
+    pub async fn first_child(&self) -> Result<Element> {
+        self.js_element("this.firstElementChild").await
+    }
+
+    /// Get the next sibling element.
+    pub async fn next(&self) -> Result<Element> {
+        self.js_element("this.nextElementSibling").await
+    }
+
+    /// Get the previous sibling element.
+    pub async fn prev(&self) -> Result<Element> {
+        self.js_element("this.previousElementSibling").await
+    }
+
+    /// Helper: evaluate a JS expression that returns an element node,
+    /// parse its outerHTML, and return a new `Element`.
+    async fn js_element(&self, js_expr: &str) -> Result<Element> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let fn_decl = format!(
+                    "function() {{ var el = {}; return el ? el.outerHTML : null; }}",
+                    js_expr
+                );
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(fn_decl)
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build: {e}")))?;
+                let result = page
+                    .execute(params)
+                    .await
+                    .map_err(|e| Error::Browser(format!("js_element: {e}")))?;
+                let html_str = result
+                    .result
+                    .result
+                    .value
+                    .and_then(|v| v.as_str().map(String::from))
+                    .ok_or_else(|| Error::ElementNotFound("no element returned".into()))?;
+                let doc = scraper::Html::parse_document(&html_str);
+                let sel = Selector::parse("*").unwrap();
+                let el_ref = doc
+                    .select(&sel)
+                    .next()
+                    .ok_or_else(|| Error::ElementNotFound("parse element".into()))?;
+                Ok(from_scraper_element(&el_ref, None, self.page.clone()))
+            } else {
+                Err(Error::ElementNotFound("no object_id".into()))
+            }
+        } else {
+            Err(Error::ElementNotFound("no CDP".into()))
+        }
+    }
+
     /// Execute JavaScript with `this` bound to this element.
     pub async fn js(&self, script: &str) -> Result<()> {
         let page = self
@@ -314,17 +532,48 @@ impl Element {
             .as_ref()
             .ok_or(Error::Browser("js requires Chromium mode".into()))?;
 
+        // If we have an object_id, use CDP Runtime.callFunctionOn for reliability
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let function_decl = format!("function() {{ {script} }}");
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(function_decl)
+                    .await_promise(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build callFunctionOn: {e}")))?;
+                page.execute(params)
+                    .await
+                    .map_err(|e| Error::Browser(format!("element js: {e}")))?;
+                return Ok(());
+            }
+        }
+
+        // Fallback: use locator-based query
         let locator = self
             .locator
             .as_ref()
             .ok_or(Error::Browser("no locator for element".into()))?;
-        let selector = locator_to_query(locator)?;
 
-        let wrapped = format!(
-            "(function(){{ var el = document.querySelector('{}'); if(!el) return; (function(){{ {} }}).call(el); }})()",
-            selector.replace('\\', "\\\\").replace('\'', "\\'"),
-            script,
-        );
+        let wrapped = if locator.is_css() {
+            let selector = locator_to_query(locator)?;
+            format!(
+                "(function(){{ var el = document.querySelector('{}'); if(!el) return; (function(){{ {} }}).call(el); }})()",
+                selector.replace('\\', "\\\\").replace('\'', "\\'"),
+                script,
+            )
+        } else {
+            // XPath-based locator: use document.evaluate()
+            let xpath = locator
+                .to_xpath()
+                .ok_or_else(|| Error::InvalidLocator("cannot convert to XPath".into()))?;
+            format!(
+                "(function(){{ var result = document.evaluate('{}', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); var el = result.singleNodeValue; if(!el) return; (function(){{ {} }}).call(el); }})()",
+                xpath.replace('\\', "\\\\").replace('\'', "\\'"),
+                script,
+            )
+        };
         page.evaluate(wrapped.as_str())
             .await
             .map_err(|e| Error::Browser(format!("element js: {e}")))?;
