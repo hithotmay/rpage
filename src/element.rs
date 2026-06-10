@@ -431,19 +431,68 @@ impl Element {
     }
 
     /// Upload a file to an `<input type="file">` element.
+    ///
+    /// Uses CDP `DOM.setFileInputFiles` which reliably bypasses browser
+    /// security restrictions (JS DataTransfer approach is blocked by most
+    /// browsers for programmatic file assignment).
     pub async fn upload_file(&self, path: &str) -> Result<()> {
-        let escaped = path.replace('\\', "\\\\").replace('\'', "\\'");
-        let js = format!(
-            "(function() {{ \
-               var input = this; \
-               var dt = new DataTransfer(); \
-               dt.items.add(new File([''], '{}')); \
-               input.files = dt.files; \
-               input.dispatchEvent(new Event('change', {{bubbles: true}})); \
-             }}).call(this);",
-            escaped
-        );
-        self.js(&js).await
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("upload_file requires Chromium mode".into()))?;
+        let cdp_el = self.cdp_element().await?;
+        use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
+        let params = SetFileInputFilesParams::builder()
+            .file(path)
+            .object_id(cdp_el.remote_object_id.clone())
+            .build()
+            .map_err(|e| Error::Browser(format!("build setFileInputFiles: {e}")))?;
+        page.execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("setFileInputFiles: {e}")))?;
+        Ok(())
+    }
+
+    /// Right-click this element (fires `contextmenu` event).
+    pub async fn right_click(&self) -> Result<()> {
+        self.js("this.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true}))")
+            .await
+    }
+
+    /// Double-click this element (fires `dblclick` event).
+    pub async fn double_click(&self) -> Result<()> {
+        self.js("this.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))")
+            .await
+    }
+
+    /// Take a screenshot of just this element and save to `path` as PNG.
+    pub async fn screenshot(&self, path: &str) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        let _ = cdp_el.scroll_into_view().await;
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("screenshot requires Chromium mode".into()))?;
+        let bbox = cdp_el
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
+        use chromiumoxide::cdp::browser_protocol::page::Viewport;
+        use chromiumoxide::page::ScreenshotParams;
+        let clip = Viewport {
+            x: bbox.x,
+            y: bbox.y,
+            width: bbox.width,
+            height: bbox.height,
+            scale: 1.0,
+        };
+        let params = ScreenshotParams::builder().clip(clip).build();
+        let bytes = page
+            .screenshot(params)
+            .await
+            .map_err(|e| Error::Browser(format!("screenshot: {e}")))?;
+        std::fs::write(path, bytes)?;
+        Ok(())
     }
 
     /// Submit the form this element belongs to.
@@ -724,5 +773,29 @@ pub(crate) fn from_scraper_element(
         )
     } else {
         Element::new_session(locator, html, tag, text, attrs)
+    }
+}
+
+// ── Batch operations on Vec<Element> ──────────────────────
+
+/// Extension trait for batch operations on `Vec<Element>`.
+pub trait ElementBatch {
+    /// Get text content of all elements.
+    fn texts(&self) -> Vec<&str>;
+    /// Get a specific attribute from all elements.
+    fn attr_values(&self, name: &str) -> Vec<Option<&str>>;
+    /// Get all matching elements that are displayed.
+    fn displayed(&self) -> Vec<&Element>;
+}
+
+impl ElementBatch for [Element] {
+    fn texts(&self) -> Vec<&str> {
+        self.iter().map(|e| e.text()).collect()
+    }
+    fn attr_values(&self, name: &str) -> Vec<Option<&str>> {
+        self.iter().map(|e| e.attr(name)).collect()
+    }
+    fn displayed(&self) -> Vec<&Element> {
+        self.iter().filter(|e| e.is_displayed()).collect()
     }
 }

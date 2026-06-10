@@ -518,6 +518,35 @@ impl WebPage {
             .await
     }
 
+    // ── Press / PDF / Viewport (Chromium only) ──────────────
+
+    /// Press a key at page level.
+    pub async fn press(&self, key: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("press requires Chromium mode".into()))?
+            .press(key)
+            .await
+    }
+
+    /// Export page to PDF.
+    pub async fn pdf(&self, path: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("pdf requires Chromium mode".into()))?
+            .pdf(path)
+            .await
+    }
+
+    /// Set viewport size at runtime.
+    pub async fn set_viewport(&self, width: u32, height: u32) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_viewport requires Chromium mode".into()))?
+            .set_viewport(width, height)
+            .await
+    }
+
     // ── Accessors ────────────────────────────────────────────
 
     pub fn chromium(&self) -> Option<&ChromiumPage> {

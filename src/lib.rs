@@ -27,6 +27,7 @@ pub use config::{ChromiumOptions, SessionOptions, WebPageOptions};
 pub use cookie_hub::CookieHub;
 pub use download::DownloadManager;
 pub use element::Element;
+pub use element::ElementBatch;
 pub use error::{Error, Result};
 pub use locator::{parse_locator, IntoLocator, Locator};
 pub use network::NetworkMonitor;

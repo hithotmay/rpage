@@ -106,11 +106,17 @@ impl ChromiumPage {
 
         // Apply viewport
         if opts.viewport.width > 0 && opts.viewport.height > 0 {
-            let js = format!(
-                "window.resizeTo({}, {})",
-                opts.viewport.width, opts.viewport.height
+            use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
+            let params = SetDeviceMetricsOverrideParams::new(
+                opts.viewport.width as i64,
+                opts.viewport.height as i64,
+                1.0,
+                false,
             );
-            page.page.evaluate(js.as_str()).await.ok();
+            page.page
+                .execute(params)
+                .await
+                .map_err(|e| Error::Browser(format!("viewport: {e}")))?;
         }
 
         // Apply user-agent if specified
@@ -281,7 +287,12 @@ impl ChromiumPage {
             .reload()
             .await
             .map_err(|e| Error::Browser(format!("refresh: {e}")))?;
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Best effort wait for navigation — don't fail if no actual navigation occurs
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.page.wait_for_navigation_response(),
+        )
+        .await;
         Ok(())
     }
 
@@ -291,7 +302,12 @@ impl ChromiumPage {
             .evaluate("history.back()")
             .await
             .map_err(|e| Error::Browser(format!("back: {e}")))?;
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Best effort wait for navigation — don't fail for SPAs without real navigation
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.page.wait_for_navigation_response(),
+        )
+        .await;
         Ok(())
     }
 
@@ -301,7 +317,12 @@ impl ChromiumPage {
             .evaluate("history.forward()")
             .await
             .map_err(|e| Error::Browser(format!("forward: {e}")))?;
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Best effort wait for navigation — don't fail for SPAs without real navigation
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.page.wait_for_navigation_response(),
+        )
+        .await;
         Ok(())
     }
 
@@ -324,6 +345,28 @@ impl ChromiumPage {
     /// Find the first element. Auto-retries for up to 5 seconds if not found.
     pub async fn ele(&self, locator_str: &str) -> Result<Element> {
         let locator = crate::locator::parse_locator(locator_str)?;
+
+        // Handle Chain locator step-by-step: narrow scope through each step
+        if let crate::locator::Locator::Chain(steps) = &locator {
+            if steps.is_empty() {
+                return Err(Error::InvalidLocator("empty chain".into()));
+            }
+            // Find the first element using first locator
+            let first_sel = locator_to_selector(&steps[0])?;
+            let mut cdp_el = self.wait_for_element(&first_sel, 5).await?;
+
+            // For each subsequent step, search within the current element
+            for step in steps.iter().skip(1) {
+                let step_sel = locator_to_selector(step)?;
+                cdp_el = cdp_el
+                    .find_element(&step_sel)
+                    .await
+                    .map_err(|e| Error::ElementNotFound(format!("chain step: {e}")))?;
+            }
+
+            return self.build_element_from_cdp(cdp_el, locator).await;
+        }
+
         let selector = locator_to_selector(&locator)?;
 
         // Auto-retry: wait up to 5 seconds for element to appear
@@ -335,12 +378,67 @@ impl ChromiumPage {
     /// Find all matching elements (no retry — returns immediately).
     pub async fn eles(&self, locator_str: &str) -> Result<Vec<Element>> {
         let locator = crate::locator::parse_locator(locator_str)?;
+
+        // Handle Chain locator step-by-step: narrow scope through each step
+        if let crate::locator::Locator::Chain(steps) = &locator {
+            if steps.is_empty() {
+                return Err(Error::InvalidLocator("empty chain".into()));
+            }
+            // Find parent elements using first locator
+            let first_sel = locator_to_selector(&steps[0])?;
+            let parent_els = self
+                .page
+                .find_elements(&first_sel)
+                .await
+                .map_err(|e| Error::ElementNotFound(format!("chain first step: {e}")))?;
+
+            // For each parent, find children matching remaining steps
+            let mut results = Vec::new();
+            for parent in parent_els {
+                let mut inner_els = vec![parent];
+
+                for step in steps.iter().skip(1) {
+                    let step_sel = locator_to_selector(step)?;
+                    let mut next_els = Vec::new();
+                    for el in &inner_els {
+                        if let Ok(children) = el.find_elements(&step_sel).await {
+                            next_els.extend(children);
+                        }
+                    }
+                    inner_els = next_els;
+                    if inner_els.is_empty() {
+                        break;
+                    }
+                }
+
+                for cdp_el in &inner_els {
+                    let el = self
+                        .build_element_from_cdp_ref(cdp_el, locator.clone())
+                        .await?;
+                    results.push(el);
+                }
+            }
+            return Ok(results);
+        }
+
         let selector = locator_to_selector(&locator)?;
-        let cdp_els = self
+
+        // Auto-retry: wait up to 5 seconds for at least one element
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut cdp_els = self
             .page
             .find_elements(&selector)
             .await
             .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
+
+        while cdp_els.is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cdp_els = self
+                .page
+                .find_elements(&selector)
+                .await
+                .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
+        }
 
         let locator_clone = locator.clone();
         let mut results = Vec::with_capacity(cdp_els.len());
@@ -386,45 +484,7 @@ impl ChromiumPage {
     }
 
     /// Build an rpage Element from a CDP Element.
-    async fn build_element_from_cdp(
-        &self,
-        cdp_el: chromiumoxide::Element,
-        locator: crate::locator::Locator,
-    ) -> Result<Element> {
-        let html = cdp_el.outer_html().await.ok().flatten().unwrap_or_default();
-        let text = cdp_el.inner_text().await.ok().flatten().unwrap_or_default();
-        let tag = cdp_el
-            .string_property("tagName")
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .to_lowercase();
-        let attrs = cdp_el
-            .call_js_fn(
-                "function(){ var r=[]; for(var i=0;i<this.attributes.length;i++){var a=this.attributes[i]; r.push([a.name,a.value]);} return JSON.stringify(r); }",
-                false,
-            )
-            .await
-            .ok()
-            .and_then(|r| {
-                r.result.value.and_then(|v| serde_json::from_value(v).ok())
-            })
-            .unwrap_or_default();
-
-        Ok(Element::new_cdp(
-            self.page.clone(),
-            cdp_el.remote_object_id.clone().into(),
-            Some(locator),
-            html,
-            tag,
-            text,
-            attrs,
-        ))
-    }
-
-    /// Build an rpage Element from a CDP Element reference.
-    async fn build_element_from_cdp_ref(
+    async fn build_element_from_cdp_inner(
         &self,
         cdp_el: &chromiumoxide::Element,
         locator: crate::locator::Locator,
@@ -459,6 +519,24 @@ impl ChromiumPage {
             text,
             attrs,
         ))
+    }
+
+    /// Build an rpage Element from an owned CDP Element.
+    async fn build_element_from_cdp(
+        &self,
+        cdp_el: chromiumoxide::Element,
+        locator: crate::locator::Locator,
+    ) -> Result<Element> {
+        self.build_element_from_cdp_inner(&cdp_el, locator).await
+    }
+
+    /// Build an rpage Element from a CDP Element reference.
+    async fn build_element_from_cdp_ref(
+        &self,
+        cdp_el: &chromiumoxide::Element,
+        locator: crate::locator::Locator,
+    ) -> Result<Element> {
+        self.build_element_from_cdp_inner(cdp_el, locator).await
     }
 
     // ── Page info ────────────────────────────────────────────
@@ -720,6 +798,63 @@ impl ChromiumPage {
             .execute(ClearBrowserCookiesParams::default())
             .await
             .map_err(|e| Error::Browser(format!("clear cookies: {e}")))?;
+        Ok(())
+    }
+
+    // ── PDF export ──────────────────────────────────────────
+
+    /// Print current page to PDF and save to `path`.
+    ///
+    /// Note: generating PDF is only supported in Chrome headless mode.
+    pub async fn pdf(&self, path: &str) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
+        let bytes = self
+            .page
+            .pdf(PrintToPdfParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("pdf: {e}")))?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    // ── Viewport ────────────────────────────────────────────
+
+    /// Set viewport size at runtime.
+    pub async fn set_viewport(&self, width: u32, height: u32) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
+        let params = SetDeviceMetricsOverrideParams::new(width as i64, height as i64, 1.0, false);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("viewport: {e}")))?;
+        Ok(())
+    }
+
+    // ── Keyboard (page-level) ──────────────────────────────
+
+    /// Press a key at page level (no element focus needed).
+    pub async fn press(&self, key: &str) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        let down = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key(key)
+            .build()
+            .map_err(|e| Error::Browser(format!("key build: {e}")))?;
+        self.page
+            .execute(down)
+            .await
+            .map_err(|e| Error::Browser(format!("press: {e}")))?;
+        let up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key(key)
+            .build()
+            .map_err(|e| Error::Browser(format!("key build: {e}")))?;
+        self.page
+            .execute(up)
+            .await
+            .map_err(|e| Error::Browser(format!("press up: {e}")))?;
         Ok(())
     }
 
