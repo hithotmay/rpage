@@ -23,7 +23,9 @@ pub mod prelude;
 
 // Re-export key types at crate root
 pub use chromium_page::ChromiumPage;
-pub use chromium_page::CookieInfo;
+pub use chromium_page::{
+    ActionChain, CookieInfo, FrameContext, InterceptGuard, InterceptedRequest,
+};
 pub use config::{ChromiumOptions, SessionOptions, WebPageOptions};
 pub use cookie_hub::CookieHub;
 pub use download::DownloadManager;

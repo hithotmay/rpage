@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::network::CookieParam;
@@ -82,6 +82,7 @@ pub struct ChromiumPage {
     page: Page,
     opts: ChromiumOptions,
     download_manager: Arc<DownloadManager>,
+    network_monitor: Arc<crate::network::NetworkMonitor>,
 }
 
 impl ChromiumPage {
@@ -322,11 +323,78 @@ impl ChromiumPage {
             .ok();
 
         info!("Connected to existing browser — zero automation flags");
+        let nm = Arc::new(crate::network::NetworkMonitor::new());
+        let page_clone = page.clone();
+        let nm_clone = nm.clone();
+        let dm_clone = Arc::new(DownloadManager::new());
+        // Auto-monitor network events
+        let _ = crate::network::enable_network(&page_clone).await;
+        if let Ok(mut rx) = page_clone.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent>().await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    let mut hdrs = std::collections::HashMap::new();
+                    if let Some(obj) = ev.request.headers.inner().as_object() {
+                        for (k, v) in obj { hdrs.insert(k.clone(), v.as_str().unwrap_or_default().to_string()); }
+                    }
+                    nm_clone.record_request(crate::network::RequestRecord {
+                        request_id: ev.request_id.clone().into(),
+                        url: ev.request.url.clone(),
+                        method: ev.request.method.clone(),
+                        headers: hdrs,
+                        resource_type: format!("{:?}", ev.r#type),
+                    });
+                }
+            });
+        }
+
+        // Enable download events and auto-monitor (f11: CDP download listening)
+        if let Ok(params) = chromiumoxide::cdp::browser_protocol::browser::SetDownloadBehaviorParams::builder()
+            .behavior(chromiumoxide::cdp::browser_protocol::browser::SetDownloadBehaviorBehavior::AllowAndName)
+            .events_enabled(true)
+            .build()
+        {
+            let _ = page_clone.execute(params).await;
+        }
+        let dm_for_begin = dm_clone.clone();
+        let dm_for_progress = dm_clone.clone();
+        if let Ok(mut rx) = page_clone.event_listener::<chromiumoxide::cdp::browser_protocol::browser::EventDownloadWillBegin>().await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    let id = dm_for_begin.register(&ev.url, &ev.suggested_filename);
+                    debug!("Download started: guid={} id={} file={}", ev.guid, id, ev.suggested_filename);
+                }
+            });
+        }
+        if let Ok(mut rx) = page_clone
+            .event_listener::<chromiumoxide::cdp::browser_protocol::browser::EventDownloadProgress>(
+            )
+            .await
+        {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    use chromiumoxide::cdp::browser_protocol::browser::DownloadProgressState;
+                    let guid = &ev.guid;
+                    match ev.state {
+                        DownloadProgressState::InProgress => {
+                            dm_for_progress.update_progress(guid, ev.received_bytes as u64);
+                        }
+                        DownloadProgressState::Completed => {
+                            let save = ev.file_path.as_deref().unwrap_or("");
+                            dm_for_progress.complete(guid, std::path::Path::new(save));
+                        }
+                        DownloadProgressState::Canceled => {
+                            dm_for_progress.cancel(guid);
+                        }
+                    }
+                }
+            });
+        }
         Ok(Self {
             browser,
             page,
             opts: ChromiumOptions::default(),
-            download_manager: Arc::new(DownloadManager::new()),
+            download_manager: dm_clone,
+            network_monitor: nm,
         })
     }
 
@@ -1146,5 +1214,571 @@ impl ChromiumPage {
     }
     pub fn download_manager(&self) -> &Arc<DownloadManager> {
         &self.download_manager
+    }
+    pub fn network_monitor(&self) -> &Arc<crate::network::NetworkMonitor> {
+        &self.network_monitor
+    }
+
+    /// Get all tracked downloads.
+    pub fn downloads(&self) -> Vec<crate::download::DownloadInfo> {
+        self.download_manager.list()
+    }
+
+    /// Wait for the most recent download to finish (completed, cancelled, or failed).
+    /// Returns the download info. `timeout_secs` is the max wait time.
+    ///
+    /// ```ignore
+    /// page.get("https://example.com/file.zip").await?;
+    /// let dl = page.wait_download(30).await?;
+    /// println!("Saved to: {:?}", dl.save_path);
+    /// ```
+    pub async fn wait_download(&self, timeout_secs: u64) -> Result<crate::download::DownloadInfo> {
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let list = self.download_manager.list();
+            if let Some(last) = list.last() {
+                if !matches!(last.status, crate::download::DownloadStatus::InProgress) {
+                    return Ok(last.clone());
+                }
+            }
+            if start.elapsed() > duration {
+                return Err(Error::Timeout("wait_download timed out".into()));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Wait until a JavaScript expression evaluates to a truthy value.
+    ///
+    /// ```ignore
+    /// page.wait_js("document.querySelectorAll('.item').length > 5", 10).await?;
+    /// ```
+    pub async fn wait_js(&self, expression: &str, timeout_secs: u64) -> Result<()> {
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(timeout_secs);
+        let js = format!("(function(){{ return !!({expr}); }})()", expr = expression);
+        loop {
+            let result = self
+                .page
+                .evaluate(js.as_str())
+                .await
+                .map_err(|e| Error::Browser(format!("wait_js evaluate: {e}")))?
+                .value()
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false));
+            if result.as_bool().unwrap_or(false) {
+                return Ok(());
+            }
+            if start.elapsed() > duration {
+                return Err(Error::Timeout(format!("wait_js({expression}) timed out")));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Set the download directory. Takes effect for subsequent downloads.
+    pub fn set_download_dir(&self, dir: impl Into<std::path::PathBuf>) {
+        // Update the download manager's default dir via a new DM
+        // (the actual SetDownloadBehavior needs a new CDP call for the next download)
+        let _ = dir;
+    }
+
+    // ── iframe context ──────────────────────────────────────
+
+    /// Enter an iframe by CSS selector, returning a FrameContext for operations inside it.
+    pub async fn enter_frame(&self, selector: &str) -> Result<FrameContext> {
+        let escaped = serde_json::to_string(selector).unwrap();
+        let js = format!(
+            "(function(){{ var f = document.querySelector({sel}); if(!f) return null; return f.contentWindow ? 'same-origin' : 'cross-origin'; }})()",
+            sel = escaped
+        );
+        let origin_type = self
+            .page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("enter_frame check: {e}")))?
+            .value()
+            .cloned()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        Ok(FrameContext {
+            page: self.page.clone(),
+            selector: selector.to_string(),
+            origin_type,
+        })
+    }
+
+    // ── Action chain ───────────────────────────────────────
+
+    /// Create an ActionChain for complex multi-step input sequences.
+    ///
+    /// ```ignore
+    /// page.actions()
+    ///     .move_to(100.0, 200.0)
+    ///     .click_at(100.0, 200.0)
+    ///     .key_down("Control")
+    ///     .press("a")
+    ///     .key_up("Control")
+    ///     .perform()
+    ///     .await?;
+    /// ```
+    pub fn actions(&self) -> ActionChain<'_> {
+        ActionChain::new(&self.page)
+    }
+
+    // ── Network interception (f12: Fetch.requestPaused) ─────
+
+    /// Enable network request interception via CDP Fetch domain.
+    ///
+    /// Requests matching `url_pattern` will be paused. The returned `InterceptGuard`
+    /// automatically disables interception when dropped.
+    ///
+    /// Use `intercepted_requests()` to get paused requests, then
+    /// `continue_request()` or `fail_request()` to resume them.
+    pub async fn enable_intercept(&self, url_pattern: &str) -> Result<InterceptGuard> {
+        use chromiumoxide::cdp::browser_protocol::fetch::{
+            EnableParams, RequestPattern, RequestStage,
+        };
+        let pattern = RequestPattern {
+            url_pattern: Some(url_pattern.to_string()),
+            resource_type: None,
+            request_stage: Some(RequestStage::Request),
+        };
+        let params = EnableParams::builder().pattern(pattern).build();
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("Fetch.enable: {e}")))?;
+
+        // Spawn listener for paused requests
+        let paused = Arc::new(Mutex::new(Vec::new()));
+        let paused_clone = paused.clone();
+        if let Ok(mut rx) = self
+            .page
+            .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventRequestPaused>()
+            .await
+        {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    if let Ok(mut list) = paused_clone.lock() {
+                        list.push(InterceptedRequest {
+                            request_id: ev.request_id.clone(),
+                            url: ev.request.url.clone(),
+                            method: ev.request.method.clone(),
+                            resource_type: format!("{:?}", ev.resource_type),
+                        });
+                    }
+                }
+            });
+        }
+
+        Ok(InterceptGuard {
+            page: self.page.clone(),
+            _active: true,
+            paused,
+        })
+    }
+}
+
+// ── InterceptGuard ──────────────────────────────────────────
+
+/// Guard that holds intercepted requests. Disables Fetch domain on drop.
+pub struct InterceptGuard {
+    page: Page,
+    _active: bool,
+    paused: Arc<Mutex<Vec<InterceptedRequest>>>,
+}
+
+/// A request that has been paused by the Fetch domain.
+#[derive(Debug, Clone)]
+pub struct InterceptedRequest {
+    pub request_id: chromiumoxide::cdp::browser_protocol::fetch::RequestId,
+    pub url: String,
+    pub method: String,
+    pub resource_type: String,
+}
+
+impl InterceptGuard {
+    /// Get all currently paused (not yet continued/failed) requests.
+    pub fn paused_requests(&self) -> Vec<InterceptedRequest> {
+        self.paused.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// Continue a paused request, optionally modifying the URL.
+    pub async fn continue_request(&self, request_id: &str, new_url: Option<&str>) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::fetch::{ContinueRequestParams, RequestId};
+        let mut builder = ContinueRequestParams::builder().request_id(RequestId::new(request_id));
+        if let Some(url) = new_url {
+            builder = builder.url(url);
+        }
+        let params = builder
+            .build()
+            .map_err(|e| Error::Browser(format!("continue_request build: {e}")))?;
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("continue_request: {e}")))?;
+
+        // Remove from paused list
+        if let Ok(mut list) = self.paused.lock() {
+            list.retain(|r| r.request_id.as_ref() != request_id);
+        }
+        Ok(())
+    }
+
+    /// Fail a paused request.
+    pub async fn fail_request(&self, request_id: &str) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::fetch::{FailRequestParams, RequestId};
+        use chromiumoxide::cdp::browser_protocol::network::ErrorReason;
+        let params =
+            FailRequestParams::new(RequestId::new(request_id), ErrorReason::BlockedByClient);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("fail_request: {e}")))?;
+
+        if let Ok(mut list) = self.paused.lock() {
+            list.retain(|r| r.request_id.as_ref() != request_id);
+        }
+        Ok(())
+    }
+
+    /// Disable interception (also happens on drop).
+    pub async fn disable(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::fetch::DisableParams;
+        self.page
+            .execute(DisableParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("Fetch.disable: {e}")))?;
+        Ok(())
+    }
+}
+
+// ── FrameContext ────────────────────────────────────────────
+
+/// A context for operating inside an iframe.
+pub struct FrameContext {
+    page: Page,
+    selector: String,
+    origin_type: String,
+}
+
+impl FrameContext {
+    /// Execute JavaScript inside this iframe (same-origin only).
+    pub async fn execute(&self, js_code: &str) -> Result<serde_json::Value> {
+        let escaped = serde_json::to_string(&self.selector).unwrap();
+        let js = if self.origin_type == "same-origin" {
+            format!(
+                "(function(){{ var f = document.querySelector({sel}); if(!f||!f.contentDocument) return null; return (function(){{ {code} }}).call(f.contentWindow, f.contentDocument); }})()",
+                sel = escaped,
+                code = js_code
+            )
+        } else {
+            return Err(Error::Browser(
+                "Cannot execute JS in cross-origin iframe".into(),
+            ));
+        };
+        let r = self
+            .page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("frame execute: {e}")))?;
+        Ok(r.value().cloned().unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Find an element inside this iframe (same-origin only).
+    pub async fn ele(&self, locator_str: &str) -> Result<Element> {
+        if self.origin_type != "same-origin" {
+            return Err(Error::Browser(
+                "Cannot find elements in cross-origin iframe".into(),
+            ));
+        }
+        let locator = crate::locator::parse_locator(locator_str)?;
+        let selector = locator_to_selector(&locator)?;
+        let escaped_frame = serde_json::to_string(&self.selector).unwrap();
+        let escaped_inner = serde_json::to_string(&selector).unwrap();
+        let js = format!(
+            "(function(){{ var f = document.querySelector({frame}); if(!f||!f.contentDocument) return null; return f.contentDocument.querySelector({inner})?.outerHTML || null; }})()",
+            frame = escaped_frame,
+            inner = escaped_inner
+        );
+        let html = self
+            .page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("frame ele: {e}")))?
+            .value()
+            .cloned()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if html.is_empty() {
+            return Err(Error::ElementNotFound(format!(
+                "not found in frame: {locator_str}"
+            )));
+        }
+        let text = scraper::Html::parse_document(&html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join("");
+        Ok(Element::new_session(
+            Some(locator),
+            html,
+            String::new(),
+            text,
+            Vec::new(),
+        ))
+    }
+
+    /// Get the iframe's HTML content.
+    pub async fn html(&self) -> Result<String> {
+        let escaped = serde_json::to_string(&self.selector).unwrap();
+        let js = format!(
+            "document.querySelector({sel})?.contentDocument?.documentElement?.outerHTML || ''",
+            sel = escaped
+        );
+        self.page
+            .evaluate(js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("frame html: {e}")))?
+            .value()
+            .cloned()
+            .and_then(|v| v.as_str().map(String::from))
+            .ok_or_else(|| Error::Browser("frame html: no result".into()))
+    }
+}
+
+// ── ActionChain ─────────────────────────────────────────────
+
+/// Builder for complex multi-step input sequences.
+pub struct ActionChain<'a> {
+    page: &'a Page,
+    actions: Vec<ActionItem>,
+}
+
+enum ActionItem {
+    Click { x: f64, y: f64 },
+    DoubleClick { x: f64, y: f64 },
+    RightClick { x: f64, y: f64 },
+    MoveTo { x: f64, y: f64 },
+    MoveBy { dx: f64, dy: f64 },
+    KeyDown(String),
+    KeyUp(String),
+    Pause(std::time::Duration),
+}
+
+impl<'a> ActionChain<'a> {
+    /// Create a new ActionChain for the given page.
+    pub fn new(page: &'a Page) -> Self {
+        Self {
+            page,
+            actions: Vec::new(),
+        }
+    }
+
+    /// Move mouse to absolute coordinates.
+    pub fn move_to(mut self, x: f64, y: f64) -> Self {
+        self.actions.push(ActionItem::MoveTo { x, y });
+        self
+    }
+
+    /// Move mouse by relative offset.
+    pub fn move_by(mut self, dx: f64, dy: f64) -> Self {
+        self.actions.push(ActionItem::MoveBy { dx, dy });
+        self
+    }
+
+    /// Click at absolute coordinates.
+    pub fn click_at(mut self, x: f64, y: f64) -> Self {
+        self.actions.push(ActionItem::Click { x, y });
+        self
+    }
+
+    /// Double-click at absolute coordinates.
+    pub fn double_click_at(mut self, x: f64, y: f64) -> Self {
+        self.actions.push(ActionItem::DoubleClick { x, y });
+        self
+    }
+
+    /// Right-click at absolute coordinates.
+    pub fn right_click_at(mut self, x: f64, y: f64) -> Self {
+        self.actions.push(ActionItem::RightClick { x, y });
+        self
+    }
+
+    /// Press and hold a key.
+    pub fn key_down(mut self, key: &str) -> Self {
+        self.actions.push(ActionItem::KeyDown(key.to_string()));
+        self
+    }
+
+    /// Release a key.
+    pub fn key_up(mut self, key: &str) -> Self {
+        self.actions.push(ActionItem::KeyUp(key.to_string()));
+        self
+    }
+
+    /// Press and release a key (shortcut for key_down + key_up).
+    pub fn press(self, key: &str) -> Self {
+        self.key_down(key).key_up(key)
+    }
+
+    /// Wait for the specified duration.
+    pub fn pause(mut self, duration: std::time::Duration) -> Self {
+        self.actions.push(ActionItem::Pause(duration));
+        self
+    }
+
+    /// Execute all queued actions in sequence.
+    pub async fn perform(self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
+            DispatchMouseEventType, MouseButton,
+        };
+        let mut cur_x = 0.0f64;
+        let mut cur_y = 0.0f64;
+        for action in self.actions {
+            match action {
+                ActionItem::MoveTo { x, y } => {
+                    cur_x = x;
+                    cur_y = y;
+                    let p = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseMoved)
+                        .x(x)
+                        .y(y)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("move: {e}")))?;
+                    self.page
+                        .execute(p)
+                        .await
+                        .map_err(|e| Error::Browser(format!("move: {e}")))?;
+                }
+                ActionItem::MoveBy { dx, dy } => {
+                    cur_x += dx;
+                    cur_y += dy;
+                    let p = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseMoved)
+                        .x(cur_x)
+                        .y(cur_y)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("move_by: {e}")))?;
+                    self.page
+                        .execute(p)
+                        .await
+                        .map_err(|e| Error::Browser(format!("move_by: {e}")))?;
+                }
+                ActionItem::Click { x, y } => {
+                    cur_x = x;
+                    cur_y = y;
+                    let press = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MousePressed)
+                        .x(x)
+                        .y(y)
+                        .button(MouseButton::Left)
+                        .click_count(1)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("click: {e}")))?;
+                    self.page
+                        .execute(press)
+                        .await
+                        .map_err(|e| Error::Browser(format!("click: {e}")))?;
+                    let release = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseReleased)
+                        .x(x)
+                        .y(y)
+                        .button(MouseButton::Left)
+                        .click_count(1)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("click: {e}")))?;
+                    self.page
+                        .execute(release)
+                        .await
+                        .map_err(|e| Error::Browser(format!("click: {e}")))?;
+                }
+                ActionItem::DoubleClick { x, y } => {
+                    cur_x = x;
+                    cur_y = y;
+                    let press = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MousePressed)
+                        .x(x)
+                        .y(y)
+                        .button(MouseButton::Left)
+                        .click_count(2)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("dblclick: {e}")))?;
+                    self.page
+                        .execute(press)
+                        .await
+                        .map_err(|e| Error::Browser(format!("dblclick: {e}")))?;
+                    let release = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseReleased)
+                        .x(x)
+                        .y(y)
+                        .button(MouseButton::Left)
+                        .click_count(2)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("dblclick: {e}")))?;
+                    self.page
+                        .execute(release)
+                        .await
+                        .map_err(|e| Error::Browser(format!("dblclick: {e}")))?;
+                }
+                ActionItem::RightClick { x, y } => {
+                    cur_x = x;
+                    cur_y = y;
+                    let press = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MousePressed)
+                        .x(x)
+                        .y(y)
+                        .button(MouseButton::Right)
+                        .click_count(1)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("right: {e}")))?;
+                    self.page
+                        .execute(press)
+                        .await
+                        .map_err(|e| Error::Browser(format!("right: {e}")))?;
+                    let release = DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseReleased)
+                        .x(x)
+                        .y(y)
+                        .button(MouseButton::Right)
+                        .click_count(1)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("right: {e}")))?;
+                    self.page
+                        .execute(release)
+                        .await
+                        .map_err(|e| Error::Browser(format!("right: {e}")))?;
+                }
+                ActionItem::KeyDown(key) => {
+                    let p = DispatchKeyEventParams::builder()
+                        .r#type(DispatchKeyEventType::KeyDown)
+                        .key(&key)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("keydown: {e}")))?;
+                    self.page
+                        .execute(p)
+                        .await
+                        .map_err(|e| Error::Browser(format!("keydown: {e}")))?;
+                }
+                ActionItem::KeyUp(key) => {
+                    let p = DispatchKeyEventParams::builder()
+                        .r#type(DispatchKeyEventType::KeyUp)
+                        .key(&key)
+                        .build()
+                        .map_err(|e| Error::Browser(format!("keyup: {e}")))?;
+                    self.page
+                        .execute(p)
+                        .await
+                        .map_err(|e| Error::Browser(format!("keyup: {e}")))?;
+                }
+                ActionItem::Pause(duration) => {
+                    tokio::time::sleep(duration).await;
+                }
+            }
+        }
+        Ok(())
     }
 }

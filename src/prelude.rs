@@ -14,4 +14,6 @@ pub use crate::web_page::{PageMode, WebPage};
 
 // Re-export ChromiumPage
 pub use crate::chromium_page::ChromiumPage;
-pub use crate::chromium_page::CookieInfo;
+pub use crate::chromium_page::{
+    ActionChain, CookieInfo, FrameContext, InterceptGuard, InterceptedRequest,
+};

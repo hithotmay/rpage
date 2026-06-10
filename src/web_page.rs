@@ -9,11 +9,14 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::chromium_page::ChromiumPage;
+use crate::chromium_page::FrameContext;
+use crate::chromium_page::{ActionChain, InterceptGuard};
 use crate::config::{ChromiumOptions, SessionOptions, WebPageOptions};
 use crate::cookie_hub::CookieHub;
 use crate::download::DownloadManager;
 use crate::element::Element;
 use crate::error::{Error, Result};
+use crate::network::NetworkMonitor;
 use crate::session_page::SessionPage;
 
 /// Current page mode.
@@ -728,5 +731,83 @@ impl WebPage {
     /// Check if in Session mode.
     pub fn is_session(&self) -> bool {
         matches!(self.mode, PageMode::Session)
+    }
+
+    // ── Advanced features ─────────────────────────────────
+
+    /// Enter an iframe by CSS selector (Chromium mode only).
+    pub async fn enter_frame(&self, selector: &str) -> Result<FrameContext> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("Not in Chromium mode".into()))?
+            .enter_frame(selector)
+            .await
+    }
+
+    /// Get the network monitor (Chromium mode only).
+    pub fn network_monitor(&self) -> Option<&Arc<NetworkMonitor>> {
+        self.chromium.as_ref().map(|c| c.network_monitor())
+    }
+
+    /// Create an ActionChain for complex multi-step input sequences.
+    ///
+    /// ```ignore
+    /// let chain = page.actions();
+    /// chain.move_to(100.0, 200.0)
+    ///     .click_at(100.0, 200.0)
+    ///     .key_down("Control")
+    ///     .press("a")
+    ///     .key_up("Control")
+    ///     .perform()
+    ///     .await?;
+    /// ```
+    pub fn actions(&self) -> Option<ActionChain<'_>> {
+        self.chromium.as_ref().map(|c| c.actions())
+    }
+
+    /// Enable network request interception. Returns an `InterceptGuard`
+    /// that holds paused requests. Call `continue_request()` or `fail_request()`
+    /// to resume them. Interception is disabled when the guard is dropped.
+    ///
+    /// ```ignore
+    /// let guard = page.enable_intercept("*/api/*").await?;
+    /// tokio::time::sleep(Duration::from_secs(5)).await;
+    /// for req in guard.paused_requests() {
+    ///     guard.continue_request(&req.request_id, None).await?;
+    /// }
+    /// guard.disable().await?;
+    /// ```
+    pub async fn enable_intercept(&self, url_pattern: &str) -> Result<InterceptGuard> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("Not in Chromium mode".into()))?
+            .enable_intercept(url_pattern)
+            .await
+    }
+
+    /// Get all tracked downloads.
+    pub fn downloads(&self) -> Vec<crate::download::DownloadInfo> {
+        self.chromium
+            .as_ref()
+            .map(|c| c.downloads())
+            .unwrap_or_default()
+    }
+
+    /// Wait for the most recent download to finish.
+    pub async fn wait_download(&self, timeout_secs: u64) -> Result<crate::download::DownloadInfo> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("Not in Chromium mode".into()))?
+            .wait_download(timeout_secs)
+            .await
+    }
+
+    /// Wait until a JavaScript expression evaluates to a truthy value.
+    pub async fn wait_js(&self, expression: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("Not in Chromium mode".into()))?
+            .wait_js(expression, timeout_secs)
+            .await
     }
 }

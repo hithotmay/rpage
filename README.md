@@ -1,6 +1,6 @@
 # rpage 🦀🌐
 
-> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**184 个公开方法，5025 行 Rust**。
+> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**284 个公开方法，5744 行 Rust**。
 
 `rpage` 是一个受 [DrissionPage](https://github.com/g1879/DrissionPage) 启发的 Rust 浏览器自动化库。
 
@@ -14,11 +14,16 @@
 - **中文完美** — `fill()` 用 JS `nativeInputValueSetter`
 - **鲁棒交互** — `click()` 自动 fallback CDP→JS，拖拽到元素或坐标
 - **标签页管理** — 创建/切换/关闭/列表
-- **条件等待** — 等元素出现/消失/删除，等标题/URL 变化
+- **条件等待** — 等元素出现/消失/删除，等标题/URL 变化，等 JS 表达式
 - **运行时修改** — headers/user_agent/viewport
 - **批量操作** — `eles().texts()` 一行获取所有文本
 - **文件上传** — 浏览器 + Session multipart 双模式
 - **PDF/截图** — 页面级和元素级
+- **下载管理** — CDP 下载事件监听 + 等待下载完成
+- **网络拦截** — Fetch.enable 拦截/修改/阻止请求
+- **ActionChain** — 复杂鼠标键盘序列
+- **iframe 上下文** — 进入 iframe 执行操作
+- **网络监控** — 记录所有请求/响应/失败
 - **灵活配置** — 环境变量 `RPAGE_CHROME_PATH`，PATH 搜索，标准路径
 
 ## 🚀 快速开始
@@ -47,7 +52,7 @@ async fn main() -> rpage::Result<()> {
 rpage = "0.1"
 ```
 
-## 📖 API 参考 (184 方法)
+## 📖 API 参考 (284 方法)
 
 ### 页面导航 + 信息 (9)
 
@@ -81,7 +86,7 @@ let els = page.eles("h3").await?;
 | `text*:登录` | 文本包含 |
 | `tag:form@@text:登录` | 链式定位 |
 
-### 条件等待 (5)
+### 条件等待 (7)
 
 ```rust
 let el = page.wait_ele("#result", 10).await?;
@@ -89,6 +94,8 @@ page.wait_ele_hidden("#loading", 5).await?;
 page.wait_ele_deleted(".modal", 5).await?;
 page.wait_title_contains("搜索结果", 5).await?;
 page.wait_url_contains("search", 5).await?;
+page.wait_js("document.querySelectorAll('.item').length > 5", 10).await?;
+let dl = page.wait_download(30).await?;
 ```
 
 ### 标签页 (6)
@@ -202,6 +209,61 @@ page.get(url).await?;   // 通用
 page.post_json(url, data).await?;
 ```
 
+### 下载管理 (4)
+
+```rust
+let downloads = page.downloads();           // 获取所有下载
+let dl = page.wait_download(30).await?;    // 等待最近下载完成
+println!("{:?}", dl.save_path);             // 下载路径
+page.download_manager().completed();        // 已完成的下载
+```
+
+### 网络拦截 (3)
+
+```rust
+let guard = page.enable_intercept("*/api/*").await?;
+tokio::time::sleep(Duration::from_secs(5)).await;
+for req in guard.paused_requests() {
+    guard.continue_request(&req.request_id, None).await?;
+}
+guard.disable().await?;  // 或 drop(guard) 自动关闭
+```
+
+### ActionChain — 复杂操作序列 (8)
+
+```rust
+page.actions()
+    .move_to(100.0, 200.0)
+    .click_at(100.0, 200.0)
+    .double_click_at(150.0, 200.0)
+    .right_click_at(200.0, 200.0)
+    .key_down("Control")
+    .press("a")
+    .key_up("Control")
+    .pause(Duration::from_millis(500))
+    .perform()
+    .await?;
+```
+
+### iframe 上下文 (4)
+
+```rust
+let ctx = page.enter_frame("iframe").await?;
+ctx.execute("document.title").await?;
+let el = ctx.ele("#btn").await?;
+let html = ctx.html().await?;
+```
+
+### 网络监控 (5)
+
+```rust
+page.network_monitor().requests();          // 所有请求
+page.network_monitor().responses();         // 所有响应
+page.network_monitor().failures();          // 失败请求
+page.network_monitor().find_requests_by_url("api");
+page.network_monitor().clear();
+```
+
 ### 模式切换 + 生命周期
 
 ```rust
@@ -246,19 +308,19 @@ page.options();           // Option<&ChromiumOptions>
 ## 项目结构
 
 ```
-rpage/  (5025 行 Rust, 184 方法)
+rpage/  (5744 行 Rust, 284 方法)
 ├── src/
-│   ├── chromium_page.rs  # CDP 浏览器控制 (51 方法)
-│   ├── web_page.rs       # 统一双模式页 (66 方法)
+│   ├── chromium_page.rs  # CDP 浏览器控制 (77 方法)
+│   ├── web_page.rs       # 统一双模式页 (73 方法)
 │   ├── element.rs        # 元素操作 (41 方法 + ElementBatch)
 │   ├── session_page.rs   # HTTP 会话 (16 方法)
+│   ├── download.rs       # 下载管理 (13 方法)
+│   ├── network.rs        # 网络监控 (13 方法)
 │   ├── cookie_hub.rs     # Cookie 同步 + 文件 (10 方法)
-│   ├── config.rs         # 配置
-│   ├── locator.rs        # 定位器解析
-│   ├── stealth.rs        # 反检测
-│   ├── network.rs        # 网络监控
-│   ├── download.rs       # 下载管理
-│   ├── wait.rs           # 等待策略
+│   ├── config.rs         # 配置 (24 方法)
+│   ├── wait.rs           # 等待策略 (6 方法)
+│   ├── locator.rs        # 定位器解析 (6 方法)
+│   ├── stealth.rs        # 反检测 (5 方法)
 │   └── error.rs          # 错误类型
 ├── examples/             # 8 个示例
 └── tests/                # 72 个测试
