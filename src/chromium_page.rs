@@ -706,6 +706,143 @@ impl ChromiumPage {
             .map_err(|e| Error::Browser(format!("new tab: {e}")))
     }
 
+    /// Get all tab titles.
+    pub async fn tab_titles(&self) -> Result<Vec<String>> {
+        let pages = self
+            .browser
+            .pages()
+            .await
+            .map_err(|e| Error::Browser(format!("pages: {e}")))?;
+        let mut titles = Vec::new();
+        for p in &pages {
+            if let Ok(t) = p.get_title().await {
+                titles.push(t.unwrap_or_default());
+            }
+        }
+        Ok(titles)
+    }
+
+    /// Get all tab URLs.
+    pub async fn tab_urls(&self) -> Result<Vec<String>> {
+        let pages = self
+            .browser
+            .pages()
+            .await
+            .map_err(|e| Error::Browser(format!("pages: {e}")))?;
+        let mut urls = Vec::new();
+        for p in &pages {
+            if let Ok(u) = p.url().await {
+                urls.push(u.unwrap_or_default());
+            }
+        }
+        Ok(urls)
+    }
+
+    /// Switch to a tab by its index (0-based). Brings the tab to front.
+    pub async fn switch_to_tab(&self, index: usize) -> Result<()> {
+        let pages = self
+            .browser
+            .pages()
+            .await
+            .map_err(|e| Error::Browser(format!("pages: {e}")))?;
+        let target = pages
+            .get(index)
+            .ok_or_else(|| Error::ElementNotFound(format!("tab index {index}")))?;
+        target
+            .bring_to_front()
+            .await
+            .map_err(|e| Error::Browser(format!("bring_to_front: {e}")))?;
+        Ok(())
+    }
+
+    /// Close a tab by index.
+    pub async fn close_tab(&self, index: usize) -> Result<()> {
+        let pages = self
+            .browser
+            .pages()
+            .await
+            .map_err(|e| Error::Browser(format!("pages: {e}")))?;
+        let target = pages
+            .get(index)
+            .ok_or_else(|| Error::ElementNotFound(format!("tab index {index}")))?;
+        target
+            .execute(chromiumoxide::cdp::browser_protocol::page::CloseParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("close_tab: {e}")))?;
+        Ok(())
+    }
+
+    // ── Conditional wait ───────────────────────────────────
+
+    /// Wait for an element matching the locator to appear.
+    pub async fn wait_ele(&self, locator_str: &str, timeout_secs: u64) -> Result<Element> {
+        let locator = crate::locator::parse_locator(locator_str)?;
+        let selector = locator_to_selector(&locator)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            match self.page.find_element(&selector).await {
+                Ok(cdp_el) => {
+                    return self.build_element_from_cdp(cdp_el, locator).await;
+                }
+                Err(_) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(Error::Timeout(format!(
+                            "wait_ele '{}' timed out after {}s",
+                            locator_str, timeout_secs
+                        )));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+
+    /// Wait for page title to contain the given text.
+    pub async fn wait_title_contains(&self, text: &str, timeout_secs: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let title = self.title().await.unwrap_or_default();
+            if title.contains(text) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!("wait_title '{}' timed out", text)));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Wait for URL to contain the given text.
+    pub async fn wait_url_contains(&self, text: &str, timeout_secs: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let url = self.url().await.unwrap_or_default();
+            if url.contains(text) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!("wait_url '{}' timed out", text)));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    // ── Runtime configuration ──────────────────────────────
+
+    /// Set extra HTTP headers for all subsequent requests.
+    pub async fn set_extra_headers(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        crate::network::set_extra_headers(&self.page, headers).await
+    }
+
+    /// Override user agent at runtime.
+    pub async fn set_user_agent(&self, user_agent: &str) -> Result<()> {
+        crate::network::set_user_agent(&self.page, user_agent).await
+    }
+
     // ── Browser lifecycle ───────────────────────────────────
 
     /// Quit the browser entirely (kills Chrome process).

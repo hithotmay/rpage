@@ -492,6 +492,42 @@ impl WebPage {
             .await
     }
 
+    /// Get all tab titles.
+    pub async fn tab_titles(&self) -> Result<Vec<String>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("tab_titles requires Chromium mode".into()))?
+            .tab_titles()
+            .await
+    }
+
+    /// Get all tab URLs.
+    pub async fn tab_urls(&self) -> Result<Vec<String>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("tab_urls requires Chromium mode".into()))?
+            .tab_urls()
+            .await
+    }
+
+    /// Switch to a tab by index (0-based).
+    pub async fn switch_to_tab(&self, index: usize) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("switch_to_tab requires Chromium mode".into()))?
+            .switch_to_tab(index)
+            .await
+    }
+
+    /// Close a tab by index.
+    pub async fn close_tab(&self, index: usize) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("close_tab requires Chromium mode".into()))?
+            .close_tab(index)
+            .await
+    }
+
     /// Set a cookie.
     pub async fn set_cookie(&self, cookie: crate::chromium_page::CookieInfo) -> Result<()> {
         self.chromium
@@ -545,6 +581,58 @@ impl WebPage {
             .as_ref()
             .ok_or_else(|| Error::Browser("set_viewport requires Chromium mode".into()))?
             .set_viewport(width, height)
+            .await
+    }
+
+    // ── Conditional wait (Chromium only) ──────────────────
+
+    /// Wait for an element matching the locator to appear.
+    pub async fn wait_ele(&self, locator_str: &str, timeout_secs: u64) -> Result<Element> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_ele requires Chromium mode".into()))?
+            .wait_ele(locator_str, timeout_secs)
+            .await
+    }
+
+    /// Wait for page title to contain the given text.
+    pub async fn wait_title_contains(&self, text: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_title_contains requires Chromium mode".into()))?
+            .wait_title_contains(text, timeout_secs)
+            .await
+    }
+
+    /// Wait for URL to contain the given text.
+    pub async fn wait_url_contains(&self, text: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_url_contains requires Chromium mode".into()))?
+            .wait_url_contains(text, timeout_secs)
+            .await
+    }
+
+    // ── Runtime configuration (Chromium only) ─────────────
+
+    /// Set extra HTTP headers for all subsequent requests.
+    pub async fn set_extra_headers(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_extra_headers requires Chromium mode".into()))?
+            .set_extra_headers(headers)
+            .await
+    }
+
+    /// Override user agent at runtime.
+    pub async fn set_user_agent(&self, user_agent: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_user_agent requires Chromium mode".into()))?
+            .set_user_agent(user_agent)
             .await
     }
 

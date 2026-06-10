@@ -500,6 +500,84 @@ impl Element {
             .await
     }
 
+    /// Drag this element to a target element.
+    pub async fn drag_to(&self, target: &Element) -> Result<()> {
+        let src = self.cdp_element().await?;
+        let tgt = target.cdp_element().await?;
+        let _ = src.scroll_into_view().await;
+
+        let src_bbox = src
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
+        let tgt_bbox = tgt
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("tgt bbox: {e}")))?;
+
+        let src_x = src_bbox.x + src_bbox.width / 2.0;
+        let src_y = src_bbox.y + src_bbox.height / 2.0;
+        let tgt_x = tgt_bbox.x + tgt_bbox.width / 2.0;
+        let tgt_y = tgt_bbox.y + tgt_bbox.height / 2.0;
+
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("drag_to requires Chromium mode".into()))?;
+
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+        };
+
+        // Move to source
+        let move_to_src = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseMoved)
+            .x(src_x)
+            .y(src_y)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(move_to_src).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Press at source
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(src_x)
+            .y(src_y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(press).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Move to target
+        let move_to_tgt = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseMoved)
+            .x(tgt_x)
+            .y(tgt_y)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(move_to_tgt).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Release at target
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(tgt_x)
+            .y(tgt_y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(release).await.ok();
+
+        Ok(())
+    }
+
     /// Set an attribute on this element.
     pub async fn set_attr(&self, name: &str, value: &str) -> Result<()> {
         let escaped_name = name.replace('\\', "\\\\").replace('\'', "\\'");
