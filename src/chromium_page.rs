@@ -73,7 +73,18 @@ impl ChromiumPage {
         let ud = std::env::temp_dir().join("rpage-chrome");
         // Use PID-based port to avoid multi-instance conflicts
         let port = 9300 + ((std::process::id() as u16) % 700);
-        Self::launch_and_connect(&chrome_path, Some(&ud), port, &[], true, None).await
+        Self::launch_and_connect(
+            &chrome_path,
+            Some(&ud),
+            port,
+            &[],
+            true,
+            None,
+            true,
+            false,
+            &[],
+        )
+        .await
     }
 
     /// 用自定义选项启动浏览器。
@@ -101,6 +112,9 @@ impl ChromiumPage {
             &extra_args,
             headless,
             proxy.as_deref(),
+            opts.disable_gpu,
+            opts.no_sandbox,
+            &opts.extension_dirs,
         )
         .await?;
 
@@ -126,6 +140,7 @@ impl ChromiumPage {
 
         Ok(page)
     }
+    #[allow(clippy::too_many_arguments)]
     async fn launch_and_connect(
         chrome_path: &PathBuf,
         user_data_dir: Option<&PathBuf>,
@@ -133,6 +148,9 @@ impl ChromiumPage {
         extra_args: &[String],
         headless: bool,
         proxy: Option<&str>,
+        disable_gpu: bool,
+        no_sandbox: bool,
+        extension_dirs: &[PathBuf],
     ) -> Result<Self> {
         let debug_url = format!("http://localhost:{port}");
 
@@ -166,6 +184,21 @@ impl ChromiumPage {
             // Apply proxy
             if let Some(proxy_url) = proxy {
                 cmd.arg(format!("--proxy-server={proxy_url}"));
+            }
+
+            // Apply disable-gpu
+            if disable_gpu {
+                cmd.arg("--disable-gpu");
+            }
+
+            // Apply no-sandbox
+            if no_sandbox {
+                cmd.arg("--no-sandbox");
+            }
+
+            // Apply extensions
+            for dir in extension_dirs {
+                cmd.arg(format!("--load-extension={}", dir.display()));
             }
 
             for arg in extra_args {
@@ -254,6 +287,11 @@ impl ChromiumPage {
                 .await
                 .map_err(|e| Error::Browser(format!("new page: {e}")))?
         };
+
+        // Apply stealth scripts
+        crate::stealth::apply_stealth(&page, &crate::stealth::StealthConfig::default())
+            .await
+            .ok();
 
         info!("Connected to existing browser — zero automation flags");
         Ok(Self {
@@ -876,29 +914,5 @@ impl ChromiumPage {
 
 /// Convert our Locator to a CSS/XPath selector string for chromiumoxide.
 fn locator_to_selector(locator: &crate::locator::Locator) -> Result<String> {
-    match locator {
-        crate::locator::Locator::Css(sel) => Ok(sel.clone()),
-        crate::locator::Locator::XPath(xp) => Ok(format!("xpath:{xp}")),
-        crate::locator::Locator::Text(t) => {
-            Ok(format!("xpath://*[text()='{}']", t.replace('\'', "\\'")))
-        }
-        crate::locator::Locator::TextContains(t) => Ok(format!(
-            "xpath://*[contains(text(),'{}')]",
-            t.replace('\'', "\\'")
-        )),
-        crate::locator::Locator::AttrEquals { attr, value } => Ok(format!(
-            "xpath://*[@{}='{}']",
-            attr,
-            value.replace('\'', "\\'")
-        )),
-        crate::locator::Locator::AttrContains { attr, value } => Ok(format!(
-            "xpath://*[contains(@{},'{}')]",
-            attr,
-            value.replace('\'', "\\'")
-        )),
-        crate::locator::Locator::Chain(locators) => locators
-            .last()
-            .ok_or_else(|| Error::InvalidLocator("empty chain".into()))
-            .and_then(locator_to_selector),
-    }
+    crate::locator::locator_to_selector(locator)
 }

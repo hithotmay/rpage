@@ -260,6 +260,33 @@ fn parse_single_locator(input: &str) -> Result<Locator> {
     Ok(Locator::Css(input.to_string()))
 }
 
+/// Convert a Locator to a CSS/XPath selector string for CDP queries.
+pub fn locator_to_selector(locator: &Locator) -> Result<String> {
+    match locator {
+        Locator::Css(sel) => Ok(sel.clone()),
+        Locator::XPath(xp) => Ok(format!("xpath:{xp}")),
+        Locator::Text(t) => Ok(format!("xpath://*[text()='{}']", t.replace('\'', "\\'"))),
+        Locator::TextContains(t) => Ok(format!(
+            "xpath://*[contains(text(),'{}')]",
+            t.replace('\'', "\\'")
+        )),
+        Locator::AttrEquals { attr, value } => Ok(format!(
+            "xpath://*[@{}='{}']",
+            attr,
+            value.replace('\'', "\\'")
+        )),
+        Locator::AttrContains { attr, value } => Ok(format!(
+            "xpath://*[contains(@{},'{}')]",
+            attr,
+            value.replace('\'', "\\'")
+        )),
+        Locator::Chain(locators) => locators
+            .last()
+            .ok_or_else(|| Error::InvalidLocator("empty chain".into()))
+            .and_then(locator_to_selector),
+    }
+}
+
 /// Trait for converting types into Locator
 pub trait IntoLocator {
     fn to_locator(&self) -> Result<Locator>;

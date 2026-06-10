@@ -11,6 +11,7 @@ use tracing::info;
 use crate::chromium_page::ChromiumPage;
 use crate::config::{ChromiumOptions, SessionOptions, WebPageOptions};
 use crate::cookie_hub::CookieHub;
+use crate::download::DownloadManager;
 use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::session_page::SessionPage;
@@ -560,5 +561,37 @@ impl WebPage {
     }
     pub fn cookie_hub(&self) -> &Arc<CookieHub> {
         &self.cookie_hub
+    }
+
+    // ── Low-level access ─────────────────────────────────────
+
+    /// Access the underlying CDP page for advanced operations.
+    pub fn inner_page(&self) -> Option<&chromiumoxide::Page> {
+        self.chromium.as_ref().map(|c| c.inner_page())
+    }
+
+    /// Access the browser instance.
+    pub fn browser(&self) -> Option<&chromiumoxide::browser::Browser> {
+        self.chromium.as_ref().map(|c| c.browser())
+    }
+
+    /// Get current ChromiumOptions.
+    pub fn options(&self) -> Option<&ChromiumOptions> {
+        self.chromium.as_ref().map(|c| c.options())
+    }
+
+    /// Get download manager.
+    pub fn download_manager(&self) -> Option<&std::sync::Arc<DownloadManager>> {
+        self.chromium.as_ref().map(|c| c.download_manager())
+    }
+
+    /// Check if in Chromium mode.
+    pub fn is_chromium(&self) -> bool {
+        matches!(self.mode, PageMode::Chromium)
+    }
+
+    /// Check if in Session mode.
+    pub fn is_session(&self) -> bool {
+        matches!(self.mode, PageMode::Session)
     }
 }

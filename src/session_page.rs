@@ -14,13 +14,13 @@ use crate::locator::Locator;
 /// SessionPage wraps reqwest for pure HTTP request mode.
 ///
 /// No browser is launched. Sends HTTP requests and parses the HTML.
-#[allow(dead_code)]
 pub struct SessionPage {
     client: reqwest::Client,
     cookie_hub: Arc<CookieHub>,
     current_html: String,
     document: Option<Html>,
     current_url: Option<String>,
+    #[allow(dead_code)]
     opts: SessionOptions,
 }
 
