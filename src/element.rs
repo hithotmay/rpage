@@ -3,11 +3,14 @@
 //! Elements carry an optional reference to the CDP page, enabling
 //! async interactions (click, input, etc.) in Chromium mode.
 
+use std::time::Duration;
+
 use chromiumoxide::Page;
 use scraper::Selector;
 
 use crate::error::{Error, Result};
 use crate::locator::{locator_to_selector, parse_locator, Locator};
+use crate::wait::WaitOptions;
 
 // ── Page identity ────────────────────────────────────────────
 
@@ -170,7 +173,19 @@ impl Element {
         if let Some(ref oid) = self.object_id {
             if !oid.is_empty() {
                 use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
-                let fn_decl = "function() { return !!(this.offsetWidth || this.offsetHeight || this.getClientRects().length); }";
+                // Robust visibility: checks display, visibility, opacity, hidden attr,
+                // AND geometry (offsetWidth/Height, getClientRects).
+                // In headless mode geometry may be 0, so CSS-based checks are primary.
+                let fn_decl = "function(){\
+                    if(!this||!this.isConnected) return false;\
+                    var s=getComputedStyle(this);\
+                    if(s.display==='none') return false;\
+                    if(s.visibility==='collapse'||s.visibility==='hidden') return false;\
+                    if(parseFloat(s.opacity)<=0) return false;\
+                    if(this.hasAttribute('hidden')) return false;\
+                    if(this.offsetWidth||this.offsetHeight||this.getClientRects().length) return true;\
+                    return s.display!=='none';\
+                }";
                 let params = match CallFunctionOnParams::builder()
                     .object_id(oid.clone())
                     .function_declaration(fn_decl)
@@ -704,6 +719,253 @@ impl Element {
         Ok(())
     }
 
+    /// Double-click this element via CDP mouse events (more realistic than JS event).
+    pub async fn double_click_cdp(&self) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+
+        let bbox = cdp_el
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
+
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("double_click_cdp requires Chromium mode".into()))?;
+
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+        };
+
+        let x = bbox.x + bbox.width / 2.0;
+        let y = bbox.y + bbox.height / 2.0;
+
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(2)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(press).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(2)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(release).await.ok();
+
+        Ok(())
+    }
+
+    /// Right-click (context-click) this element via CDP mouse events.
+    pub async fn right_click_cdp(&self) -> Result<()> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+
+        let bbox = cdp_el
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
+
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("right_click_cdp requires Chromium mode".into()))?;
+
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+        };
+
+        let x = bbox.x + bbox.width / 2.0;
+        let y = bbox.y + bbox.height / 2.0;
+
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Right)
+            .click_count(1)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(press).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Right)
+            .click_count(1)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(release).await.ok();
+
+        Ok(())
+    }
+
+    /// Check this element (for checkboxes and radio buttons).
+    pub async fn check(&self) -> Result<()> {
+        self.js("if (!this.checked) { this.click(); }").await
+    }
+
+    /// Uncheck this element (for checkboxes).
+    pub async fn uncheck(&self) -> Result<()> {
+        self.js("if (this.checked) { this.click(); }").await
+    }
+
+    /// Select an `<option>` element or select by value/text in a `<select>`.
+    pub async fn select_option(&self, value: &str) -> Result<()> {
+        let escaped = serde_json::to_string(value).unwrap();
+        let js = format!(
+            "(function() {{ \
+               if (this.tagName === 'OPTION') {{ \
+                 this.selected = true; \
+                 this.parentElement.dispatchEvent(new Event('change', {{bubbles: true}})); \
+               }} else if (this.tagName === 'SELECT') {{ \
+                 for (var i = 0; i < this.options.length; i++) {{ \
+                   var opt = this.options[i]; \
+                   if (opt.value === {} || opt.text === {}) {{ \
+                     opt.selected = true; \
+                     this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+                     return; \
+                   }} \
+                 }} \
+               }} \
+             }}).call(this);",
+            escaped, escaped
+        );
+        self.js(&js).await
+    }
+
+    /// Focus this element.
+    pub async fn focus(&self) -> Result<()> {
+        self.js("this.focus()").await
+    }
+
+    /// Blur (unfocus) this element.
+    pub async fn blur(&self) -> Result<()> {
+        self.js("this.blur()").await
+    }
+
+    /// Get the bounding box (x, y, width, height) of this element.
+    pub async fn bounding_box(&self) -> Result<(f64, f64, f64, f64)> {
+        let cdp_el = self.cdp_element().await?;
+        match cdp_el.bounding_box().await {
+            Ok(bbox) => Ok((bbox.x, bbox.y, bbox.width, bbox.height)),
+            Err(_) => {
+                // Fallback: use getBoundingClientRect via CDP CallFunctionOn
+                let page = self.page.as_ref()
+                    .ok_or_else(|| Error::Browser("bounding_box: no page ref".into()))?;
+                let oid = self.object_id.clone()
+                    .ok_or_else(|| Error::Browser("bounding_box: no object_id".into()))?;
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid)
+                    .function_declaration(
+                        "function(){var r=this.getBoundingClientRect();return [r.x,r.y,r.width,r.height]}"
+                    )
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("bounding_box: {e}")))?;
+                let result = page.execute(params).await
+                    .map_err(|e| Error::Browser(format!("bounding_box js: {e}")))?;
+                let arr = result.result.result.value
+                    .ok_or_else(|| Error::Browser("bounding_box: no value".into()))?;
+                let vals: Vec<f64> = arr.as_array()
+                    .ok_or_else(|| Error::Browser("bounding_box: not array".into()))?
+                    .iter().filter_map(|v| v.as_f64()).collect();
+                if vals.len() >= 4 {
+                    Ok((vals[0], vals[1], vals[2], vals[3]))
+                } else {
+                    Err(Error::Browser("bounding_box: insufficient values".into()))
+                }
+            }
+        }
+    }
+
+    /// Select all text in this element (focus + select).
+    pub async fn select_text(&self) -> Result<()> {
+        self.js("this.focus(); this.select()").await
+    }
+
+    /// Upload multiple files to an `<input type="file">` element.
+    pub async fn upload_files(&self, file_paths: &[&str]) -> Result<()> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("upload_files requires Chromium mode".into()))?;
+        let cdp_el = self.cdp_element().await?;
+        use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
+        let files: Vec<String> = file_paths.iter().map(|s| s.to_string()).collect();
+        let params = SetFileInputFilesParams::builder()
+            .files(files)
+            .object_id(cdp_el.remote_object_id.clone())
+            .build()
+            .map_err(|e| Error::Browser(format!("build setFileInputFiles: {e}")))?;
+        page.execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("setFileInputFiles: {e}")))?;
+        Ok(())
+    }
+
+    /// Take a screenshot of just this element and return raw PNG bytes.
+    pub async fn screenshot_bytes(&self) -> Result<Vec<u8>> {
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("screenshot_bytes requires Chromium mode".into()))?;
+
+        let bbox = cdp_el
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
+
+        use chromiumoxide::cdp::browser_protocol::page::Viewport;
+        use chromiumoxide::page::ScreenshotParams;
+
+        let clip = Viewport {
+            x: bbox.x,
+            y: bbox.y,
+            width: bbox.width,
+            height: bbox.height,
+            scale: 1.0,
+        };
+        let params = ScreenshotParams::builder().clip(clip).build();
+        let bytes = page
+            .screenshot(params)
+            .await
+            .map_err(|e| Error::Browser(format!("screenshot_bytes: {e}")))?;
+        Ok(bytes)
+    }
+
+    /// Scroll this element to bring it into view at the top of its scrollable container.
+    pub async fn scroll_to_top(&self) -> Result<()> {
+        self.js("this.scrollIntoView({behavior: 'instant', block: 'start'})")
+            .await
+    }
+
     /// Set an attribute on this element.
     pub async fn set_attr(&self, name: &str, value: &str) -> Result<()> {
         let escaped_name = serde_json::to_string(name).unwrap();
@@ -916,6 +1178,724 @@ impl Element {
                     })
                     .collect())
             }
+        }
+    }
+
+    // ── Shadow DOM piercing (CDP only) ────────────────────────
+
+    /// Find an element inside this element's Shadow DOM.
+    ///
+    /// Usage: `element.shadow_ele(".inner")` — penetrates this element's
+    /// shadowRoot and runs `querySelector(".inner")`.
+    ///
+    /// For multi-level piercing use `>>>` separator:
+    /// `element.shadow_ele(".mid >>> .inner")`
+    pub async fn shadow_ele(&self, selector: &str) -> Result<Element> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("shadow_ele requires Chromium mode".into()))?;
+        let oid = self
+            .object_id
+            .as_deref()
+            .ok_or(Error::Browser("no object_id for element".into()))?;
+
+        let parts: Vec<&str> = selector.split(">>>").map(|s| s.trim()).collect();
+        if parts.is_empty() {
+            return Err(Error::InvalidLocator("empty selector".into()));
+        }
+
+        // Build JS: start from this.shadowRoot, then drill down
+        let first_sel = serde_json::to_string(parts[0]).unwrap();
+        let js = if parts.len() == 1 {
+            format!(
+                "function() {{ \
+                   if (!this.shadowRoot) return null; \
+                   return this.shadowRoot.querySelector({sel}); \
+                 }}",
+                sel = first_sel
+            )
+        } else {
+            let mut body = String::from(
+                "if (!this.shadowRoot) return null; \
+                 var cur = this.shadowRoot;",
+            );
+            let inner_sels: Vec<String> = parts
+                .iter()
+                .map(|s| serde_json::to_string(s).unwrap())
+                .collect();
+            for (i, sel) in inner_sels.iter().enumerate() {
+                if i < inner_sels.len() - 1 {
+                    body.push_str(&format!(
+                        " cur = cur.querySelector({sel}); \
+                         if (!cur || !cur.shadowRoot) return null; \
+                         cur = cur.shadowRoot;",
+                        sel = sel
+                    ));
+                } else {
+                    body.push_str(&format!(" return cur.querySelector({sel});", sel = sel));
+                }
+            }
+            format!("function() {{ {body} }}")
+        };
+
+        // Simpler approach: combine into one function
+        let full_fn = {
+            let inner_fn = js
+                .trim_start_matches("function() {")
+                .trim_end_matches('}')
+                .trim();
+            format!(
+                "function() {{ \
+                   (function() {{ {inner_fn} }}).call(this); \
+                   var el = (function() {{ {inner_fn} }}).call(this); \
+                   if (!el) return null; \
+                   var r = {{}}; \
+                   r.html = el.outerHTML; \
+                   r.tag = el.tagName.toLowerCase(); \
+                   r.text = el.innerText || ''; \
+                   var attrs = []; \
+                   for (var i = 0; i < el.attributes.length; i++) {{ \
+                     var a = el.attributes[i]; \
+                     attrs.push([a.name, a.value]); \
+                   }} \
+                   r.attrs = attrs; \
+                   return JSON.stringify(r); \
+                 }}"
+            )
+        };
+
+        use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+        let params = CallFunctionOnParams::builder()
+            .object_id(oid.to_string())
+            .function_declaration(full_fn)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+
+        let result = page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("shadow_ele: {e}")))?;
+
+        let json_str = result
+            .result
+            .result
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .ok_or_else(|| Error::ElementNotFound("shadow element not found".into()))?;
+
+        let data: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Error::Browser(format!("parse shadow result: {e}")))?;
+
+        let html = data["html"].as_str().unwrap_or_default().to_string();
+        let tag = data["tag"].as_str().unwrap_or_default().to_string();
+        let text = data["text"].as_str().unwrap_or_default().to_string();
+        let attrs: Vec<(String, String)> = data["attrs"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let a = item.as_array()?;
+                        Some((
+                            a.first()?.as_str()?.to_string(),
+                            a.get(1)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Element::new_cdp(
+            page.clone(),
+            String::new(),
+            Some(Locator::Css(selector.to_string())),
+            html,
+            tag,
+            text,
+            attrs,
+        ))
+    }
+
+    /// Find all elements inside this element's Shadow DOM.
+    ///
+    /// Usage: `element.shadow_eles(".inner")`
+    pub async fn shadow_eles(&self, selector: &str) -> Result<Vec<Element>> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("shadow_eles requires Chromium mode".into()))?;
+        let oid = self
+            .object_id
+            .as_deref()
+            .ok_or(Error::Browser("no object_id for element".into()))?;
+
+        let parts: Vec<&str> = selector.split(">>>").map(|s| s.trim()).collect();
+        if parts.is_empty() {
+            return Err(Error::InvalidLocator("empty selector".into()));
+        }
+
+        // Build JS for querySelectorAll
+        let inner_sels: Vec<String> = parts
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .collect();
+
+        let query_body = if inner_sels.len() == 1 {
+            format!(
+                "if (!this.shadowRoot) return []; \
+                 return this.shadowRoot.querySelectorAll({sel});",
+                sel = &inner_sels[0]
+            )
+        } else {
+            let mut body =
+                String::from("if (!this.shadowRoot) return []; var cur = this.shadowRoot;");
+            for (i, sel) in inner_sels.iter().enumerate() {
+                if i < inner_sels.len() - 1 {
+                    body.push_str(&format!(
+                        " cur = cur.querySelector({sel}); \
+                         if (!cur || !cur.shadowRoot) return []; \
+                         cur = cur.shadowRoot;",
+                        sel = sel
+                    ));
+                } else {
+                    body.push_str(&format!(" return cur.querySelectorAll({sel});", sel = sel));
+                }
+            }
+            body
+        };
+
+        let full_fn = format!(
+            "function() {{ \
+               var els = (function() {{ {query_body} }}).call(this); \
+               if (!els || !els.length) return JSON.stringify([]); \
+               var results = []; \
+               for (var i = 0; i < els.length; i++) {{ \
+                 var el = els[i]; \
+                 var r = {{}}; \
+                 r.html = el.outerHTML; \
+                 r.tag = el.tagName.toLowerCase(); \
+                 r.text = el.innerText || ''; \
+                 var attrs = []; \
+                 for (var j = 0; j < el.attributes.length; j++) {{ \
+                   var a = el.attributes[j]; \
+                   attrs.push([a.name, a.value]); \
+                 }} \
+                 r.attrs = attrs; \
+                 results.push(r); \
+               }} \
+               return JSON.stringify(results); \
+             }}"
+        );
+
+        use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+        let params = CallFunctionOnParams::builder()
+            .object_id(oid.to_string())
+            .function_declaration(full_fn)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+
+        let result = page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("shadow_eles: {e}")))?;
+
+        let json_str = result
+            .result
+            .result
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "[]".to_string());
+
+        let items: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .map_err(|e| Error::Browser(format!("parse shadow results: {e}")))?;
+
+        let mut elements = Vec::with_capacity(items.len());
+        for data in &items {
+            let html = data["html"].as_str().unwrap_or_default().to_string();
+            let tag = data["tag"].as_str().unwrap_or_default().to_string();
+            let text = data["text"].as_str().unwrap_or_default().to_string();
+            let attrs: Vec<(String, String)> = data["attrs"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let a = item.as_array()?;
+                            Some((
+                                a.first()?.as_str()?.to_string(),
+                                a.get(1)?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            elements.push(Element::new_cdp(
+                page.clone(),
+                String::new(),
+                Some(Locator::Css(selector.to_string())),
+                html,
+                tag,
+                text,
+                attrs,
+            ));
+        }
+
+        Ok(elements)
+    }
+
+    // ── Wait methods (CDP only) ──────────────────────────────
+
+    /// Internal helper: re-query the element from the live page via CDP and
+    /// return a fresh `Element` with updated state.
+    async fn requery(&self) -> Result<Element> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("wait requires Chromium mode".into()))?;
+        let locator = self
+            .locator
+            .as_ref()
+            .ok_or(Error::Browser("no locator for element".into()))?;
+        let selector = locator_to_selector(locator)?;
+
+        let cdp_el = page
+            .find_element(&selector)
+            .await
+            .map_err(|e| Error::Browser(format!("re-query: {e}")))?;
+
+        let html = cdp_el.outer_html().await.ok().flatten().unwrap_or_default();
+        let text = cdp_el.inner_text().await.ok().flatten().unwrap_or_default();
+        let tag = cdp_el
+            .string_property("tagName")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .to_lowercase();
+        let attrs: Vec<(String, String)> = cdp_el
+            .call_js_fn(
+                "function(){ var r=[]; for(var i=0;i<this.attributes.length;i++){var a=this.attributes[i]; r.push([a.name,a.value]);} return JSON.stringify(r); }",
+                false,
+            )
+            .await
+            .ok()
+            .and_then(|r| {
+                r.result.value.and_then(|v| serde_json::from_value(v).ok())
+            })
+            .unwrap_or_default();
+        let object_id: String = cdp_el.remote_object_id.clone().into();
+
+        Ok(Element::new_cdp(
+            page.clone(),
+            object_id,
+            Some(locator.clone()),
+            html,
+            tag,
+            text,
+            attrs,
+        ))
+    }
+
+    /// Wait until this element is visible on the page.
+    ///
+    /// Polls by re-querying the element and checking visibility via JavaScript.
+    /// Uses default timeout (10s) and poll interval (200ms).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the element is not visible within the timeout.
+    /// Returns [`Error::Browser`] if not in CDP mode or no locator is available.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// element.wait_for_visible().await?;
+    /// element.wait_for_visible_with_timeout(Duration::from_secs(30)).await?;
+    /// ```
+    pub async fn wait_for_visible(&self) -> Result<()> {
+        self.wait_for_visible_with_options(WaitOptions::default()).await
+    }
+
+    /// Wait until this element is visible, with a custom timeout.
+    pub async fn wait_for_visible_with_timeout(&self, timeout: Duration) -> Result<()> {
+        self.wait_for_visible_with_options(WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element is visible, with full [`WaitOptions`] control.
+    pub async fn wait_for_visible_with_options(&self, opts: WaitOptions) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.is_visible().await {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found yet — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element to be visible ({:?})",
+                    opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element is hidden or removed from the DOM.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the element is still visible within the timeout.
+    pub async fn wait_for_hidden(&self) -> Result<()> {
+        self.wait_for_hidden_with_options(WaitOptions::default()).await
+    }
+
+    /// Wait until this element is hidden, with a custom timeout.
+    pub async fn wait_for_hidden_with_timeout(&self, timeout: Duration) -> Result<()> {
+        self.wait_for_hidden_with_options(WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element is hidden, with full [`WaitOptions`] control.
+    pub async fn wait_for_hidden_with_options(&self, opts: WaitOptions) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if !el.is_visible().await {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found in DOM → considered hidden
+                    return Ok(());
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element to be hidden ({:?})",
+                    opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element is enabled (not disabled).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the element remains disabled within the timeout.
+    pub async fn wait_for_enabled(&self) -> Result<()> {
+        self.wait_for_enabled_with_options(WaitOptions::default()).await
+    }
+
+    /// Wait until this element is enabled, with a custom timeout.
+    pub async fn wait_for_enabled_with_timeout(&self, timeout: Duration) -> Result<()> {
+        self.wait_for_enabled_with_options(WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element is enabled, with full [`WaitOptions`] control.
+    pub async fn wait_for_enabled_with_options(&self, opts: WaitOptions) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.is_enabled() {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element to be enabled ({:?})",
+                    opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element's text content contains the given substring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the text does not appear within the timeout.
+    pub async fn wait_for_text(&self, text: &str) -> Result<()> {
+        self.wait_for_text_with_options(text, WaitOptions::default())
+            .await
+    }
+
+    /// Wait until this element's text contains the given substring, with a custom timeout.
+    pub async fn wait_for_text_with_timeout(&self, text: &str, timeout: Duration) -> Result<()> {
+        self.wait_for_text_with_options(text, WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element's text contains the given substring, with full [`WaitOptions`].
+    pub async fn wait_for_text_with_options(
+        &self,
+        text: &str,
+        opts: WaitOptions,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.text().contains(text) {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element text to contain {:?} ({:?})",
+                    text, opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element has an attribute with the exact given value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the attribute value does not match within the timeout.
+    pub async fn wait_for_attribute(&self, name: &str, value: &str) -> Result<()> {
+        self.wait_for_attribute_with_options(name, value, WaitOptions::default())
+            .await
+    }
+
+    /// Wait until this element has an attribute with the exact given value, with a custom timeout.
+    pub async fn wait_for_attribute_with_timeout(
+        &self,
+        name: &str,
+        value: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.wait_for_attribute_with_options(name, value, WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element has an attribute with the exact given value, with full [`WaitOptions`].
+    pub async fn wait_for_attribute_with_options(
+        &self,
+        name: &str,
+        value: &str,
+        opts: WaitOptions,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.attr(name) == Some(value) {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element attribute {:?}={:?} ({:?})",
+                    name, value, opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element is removed from the DOM (stale).
+    ///
+    /// A stale element is one whose locator no longer resolves in the live page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the element is still present within the timeout.
+    pub async fn wait_for_stale(&self) -> Result<()> {
+        self.wait_for_stale_with_options(WaitOptions::default()).await
+    }
+
+    /// Wait until this element is stale, with a custom timeout.
+    pub async fn wait_for_stale_with_timeout(&self, timeout: Duration) -> Result<()> {
+        self.wait_for_stale_with_options(WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element is stale, with full [`WaitOptions`] control.
+    pub async fn wait_for_stale_with_options(&self, opts: WaitOptions) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(_) => {
+                    // Element still exists — keep waiting
+                }
+                Err(_) => {
+                    // Element gone from DOM → stale
+                    return Ok(());
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element to become stale ({:?})",
+                    opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element is both visible and enabled (clickable).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the element is not clickable within the timeout.
+    pub async fn wait_for_clickable(&self) -> Result<()> {
+        self.wait_for_clickable_with_options(WaitOptions::default())
+            .await
+    }
+
+    /// Wait until this element is clickable, with a custom timeout.
+    pub async fn wait_for_clickable_with_timeout(&self, timeout: Duration) -> Result<()> {
+        self.wait_for_clickable_with_options(WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element is clickable, with full [`WaitOptions`] control.
+    pub async fn wait_for_clickable_with_options(&self, opts: WaitOptions) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.is_visible().await && el.is_enabled() {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element to be clickable ({:?})",
+                    opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait until this element's text content exactly matches the given string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the text does not match within the timeout.
+    pub async fn wait_for_text_eq(&self, text: &str) -> Result<()> {
+        self.wait_for_text_eq_with_options(text, WaitOptions::default())
+            .await
+    }
+
+    /// Wait until this element's text exactly matches, with a custom timeout.
+    pub async fn wait_for_text_eq_with_timeout(&self, text: &str, timeout: Duration) -> Result<()> {
+        self.wait_for_text_eq_with_options(text, WaitOptions::default().timeout(timeout))
+            .await
+    }
+
+    /// Wait until this element's text exactly matches, with full [`WaitOptions`].
+    pub async fn wait_for_text_eq_with_options(
+        &self,
+        text: &str,
+        opts: WaitOptions,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.text() == text {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element text to equal {:?} ({:?})",
+                    text, opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
+        }
+    }
+
+    /// Wait for an attribute to contain a substring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if the attribute doesn't contain the value within the timeout.
+    pub async fn wait_for_attribute_contains(&self, name: &str, value: &str) -> Result<()> {
+        self.wait_for_attribute_contains_with_options(name, value, WaitOptions::default())
+            .await
+    }
+
+    /// Wait for an attribute to contain a substring, with a custom timeout.
+    pub async fn wait_for_attribute_contains_with_timeout(
+        &self,
+        name: &str,
+        value: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.wait_for_attribute_contains_with_options(
+            name,
+            value,
+            WaitOptions::default().timeout(timeout),
+        )
+        .await
+    }
+
+    /// Wait for an attribute to contain a substring, with full [`WaitOptions`].
+    pub async fn wait_for_attribute_contains_with_options(
+        &self,
+        name: &str,
+        value: &str,
+        opts: WaitOptions,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.requery().await {
+                Ok(el) => {
+                    if el.attr(name).is_some_and(|v| v.contains(value)) {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found — keep waiting
+                }
+            }
+            if start.elapsed() >= opts.timeout {
+                return Err(Error::Timeout(format!(
+                    "Timed out waiting for element attribute {:?} to contain {:?} ({:?})",
+                    name, value, opts.timeout
+                )));
+            }
+            tokio::time::sleep(opts.poll_interval).await;
         }
     }
 }

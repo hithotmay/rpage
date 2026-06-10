@@ -1,6 +1,6 @@
 # rpage 🦀🌐
 
-> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**284 个公开方法，5744 行 Rust**。
+> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**470 个公开方法，9,195 行 Rust**。
 
 `rpage` 是一个受 [DrissionPage](https://github.com/g1879/DrissionPage) 启发的 Rust 浏览器自动化库。
 
@@ -15,7 +15,11 @@
 - **鲁棒交互** — `click()` 自动 fallback CDP→JS，拖拽到元素或坐标
 - **标签页管理** — 创建/切换/关闭/列表
 - **条件等待** — 等元素出现/消失/删除，等标题/URL 变化，等 JS 表达式
+- **Element 等待** — wait_for_visible/hidden/stale/clickable/enabled/text/attribute
 - **运行时修改** — headers/user_agent/viewport
+- **窗口管理** — maximize/minimize/fullscreen/restore/set_size
+- **加载策略** — normal/eager/none 三种页面加载模式
+- **事件回调** — on_dialog/on_load/on_close 事件监听
 - **批量操作** — `eles().texts()` 一行获取所有文本
 - **文件上传** — 浏览器 + Session multipart 双模式
 - **PDF/截图** — 页面级和元素级
@@ -24,6 +28,11 @@
 - **ActionChain** — 复杂鼠标键盘序列
 - **iframe 上下文** — 进入 iframe 执行操作
 - **网络监控** — 记录所有请求/响应/失败
+- **Console 捕获** — 拦截 console.log/warn/error
+- **WebSocket 监听** — 监听 WebSocket 帧
+- **性能指标** — 页面计时 + JS Heap 等运行时指标
+- **Init Script** — 页面加载前注入 JS
+- **CSS 注入** — 动态注入/移除 CSS 样式
 - **灵活配置** — 环境变量 `RPAGE_CHROME_PATH`，PATH 搜索，标准路径
 
 ## 🚀 快速开始
@@ -52,7 +61,7 @@ async fn main() -> rpage::Result<()> {
 rpage = "0.1"
 ```
 
-## 📖 API 参考 (284 方法)
+## 📖 API 参考 (470 方法)
 
 ### 页面导航 + 信息 (9)
 
@@ -109,7 +118,7 @@ page.close_tab(0).await?;
 let tabs = page.tabs().await?;
 ```
 
-### 元素操作 (41 方法)
+### 元素操作 (55+ 方法)
 
 ```rust
 // ── 基础交互 ──
@@ -131,18 +140,26 @@ el.drag_to_offset(100.0, 50.0).await?;  // 拖到相对坐标
 el.select("选项").await?;
 el.select_by_value("val").await?;
 el.upload_file("/path/to/file").await?;
+el.upload_files(&["/a", "/b"]).await?;
+
+// ── 复选框 ──
+el.check().await?;
+el.uncheck().await?;
+let checked = el.checked();
 
 // ── 截图 ──
 el.screenshot("el.png").await?;
+let bytes = el.screenshot_bytes().await?;
 
 // ── 属性 / 状态 ──
 let v = el.attr("href");           // Option<&str>
 let v = el.value().await?;
 let (x,y,w,h) = el.rect().await?;
+let bbox = el.bounding_box().await?;  // CDP + JS fallback
 let s = el.style("color").await?;
 el.set_attr("class", "active").await?;
 el.is_displayed();                  // 同步
-el.is_visible().await?;            // 异步，真实 CDP 检测
+el.is_visible().await?;            // 异步，CSS+几何双重检测
 el.is_enabled();
 el.is_selected().await?;
 
@@ -153,9 +170,52 @@ let n = el.next().await?;
 let pv = el.prev().await?;
 let child = el.ele("a")?;
 let children = el.eles("li")?;
+let children = el.children()?;
+let sib = el.sibling()?;
+let inner = el.inner_html()?;
+let outer = el.outer_html()?;
+
+// ── 焦点 / 选择 ──
+el.focus().await?;
+el.blur().await?;
+el.select_text().await?;
+el.scroll_into_view().await?;
+el.scroll_to_top().await?;
+
+// ── Shadow DOM ──
+let shadow = el.shadow_ele("div").await?;
+let shadows = el.shadow_eles("li").await?;
 
 // ── JS ──
 el.js("this.style.color='red'").await?;
+```
+
+### Element 等待方法 (40+)
+
+```rust
+// ── 可见性 ──
+el.wait_for_visible().await?;
+el.wait_for_visible_with_timeout(Duration::from_secs(10)).await?;
+el.wait_for_hidden().await?;
+el.wait_for_hidden_with_timeout(Duration::from_secs(5)).await?;
+
+// ── 状态 ──
+el.wait_for_enabled().await?;
+el.wait_for_clickable().await?;
+el.wait_for_stale().await?;
+
+// ── 文本 ──
+el.wait_for_text("加载完成").await?;
+el.wait_for_text_eq("精确匹配").await?;
+el.wait_for_text_contains("部分").await?;
+
+// ── 属性 ──
+el.wait_for_attribute("class", "active").await?;
+el.wait_for_attribute_contains("class", "act").await?;
+
+// ── 完全自定义 ──
+let opts = WaitOptions::new(Duration::from_secs(30), Duration::from_millis(200));
+el.wait_for_visible_with_options(opts).await?;
 ```
 
 ### 批量操作 — ElementBatch
@@ -167,11 +227,12 @@ let hrefs = els.attr_values("href");    // Vec<Option<&str>>
 let visible = els.displayed();          // Vec<&Element>
 ```
 
-### 页面操作 (15)
+### 页面操作 (20+)
 
 ```rust
 page.scroll_to(0, 500).await?;
-page.scroll_to_top/bottom/up/down().await?;
+page.scroll_to_top().await?;
+page.scroll_to_bottom().await?;
 page.screenshot("shot.png").await?;
 page.pdf("page.pdf").await?;
 page.press("Enter").await?;
@@ -179,9 +240,46 @@ page.set_viewport(1920, 1080).await?;
 page.handle_alert(true, None).await?;
 page.frame_html("iframe").await?;
 page.frame_execute("iframe", "document.title").await?;
+page.scroll_to_element(&el).await?;
+page.run_async_js("await fetch('/api')").await?;
 ```
 
-### Cookie (7)
+### 窗口管理 (7)
+
+```rust
+page.maximize().await?;
+page.minimize().await?;
+page.fullscreen().await?;
+page.restore().await?;
+page.set_window_size(1280, 800).await?;
+let (l, t, w, h) = page.get_window_bounds().await?;
+```
+
+### 加载策略
+
+```rust
+page.set_load_strategy("eager").await?;  // normal / eager / none
+let strategy = page.load_strategy();      // &str
+```
+
+### 事件回调 (3)
+
+```rust
+page.on_dialog(|msg, r#type| {
+    println!("Dialog: {} ({})", msg, r#type);
+    true  // accept
+}).await?;
+
+page.on_load(|url| {
+    println!("Page loaded: {}", url);
+}).await?;
+
+page.on_close(|| {
+    println!("Page closed");
+}).await?;
+```
+
+### Cookie (10)
 
 ```rust
 let cookies = page.cookies().await?;
@@ -193,20 +291,53 @@ page.save_cookies_to_file("cookies.json").await?;
 page.load_cookies_from_file("cookies.json").await?;
 ```
 
-### 运行时修改 (2)
+### 运行时修改 (3)
 
 ```rust
 page.set_extra_headers(headers).await?;
 page.set_user_agent("Mozilla/5.0 ...").await?;
+page.set_viewport(1920, 1080).await?;
 ```
 
-### Session HTTP (4)
+### Session HTTP (10)
 
 ```rust
 page.post(url, body).await?;
 page.post_multipart(url, fields, "file", "/path").await?;
-page.get(url).await?;   // 通用
+page.get(url).await?;      // 通用（非浏览器模式用 HTTP GET）
 page.post_json(url, data).await?;
+page.session_get(url).await?;
+page.session_post(url, body).await?;
+page.session_put(url, body).await?;
+page.session_delete(url).await?;
+page.session_download(url, "file.zip").await?;
+let status = page.session_status(url).await?;
+```
+
+### Console 捕获 (3)
+
+```rust
+page.execute("console.log('hello')").await?;
+let logs = page.console_log();     // Vec<ConsoleMessage>
+page.clear_console();
+```
+
+### Init Script + CSS 注入 (4)
+
+```rust
+let id = page.add_init_script("my", "window.test = 42").await?;
+page.remove_init_script(&id).await?;
+
+let css_id = page.inject_css("body { background: red }").await?;
+page.remove_css(&css_id).await?;
+```
+
+### 性能指标 (3)
+
+```rust
+let timing = page.page_timing().await?;     // HashMap<String, f64>
+let metrics = page.performance_metrics().await?;  // Vec<(String, f64)>
+let snapshot = page.dom_snapshot().await?;   // serde_json::Value
 ```
 
 ### 下载管理 (4)
@@ -264,6 +395,13 @@ page.network_monitor().find_requests_by_url("api");
 page.network_monitor().clear();
 ```
 
+### WebSocket 监听 (2)
+
+```rust
+page.listen_websocket().await?;
+let frames = page.websocket_frames();
+```
+
 ### 模式切换 + 生命周期
 
 ```rust
@@ -308,22 +446,26 @@ page.options();           // Option<&ChromiumOptions>
 ## 项目结构
 
 ```
-rpage/  (5744 行 Rust, 284 方法)
+rpage/  (9,195 行 Rust, 470 方法)
 ├── src/
-│   ├── chromium_page.rs  # CDP 浏览器控制 (77 方法)
-│   ├── web_page.rs       # 统一双模式页 (73 方法)
-│   ├── element.rs        # 元素操作 (41 方法 + ElementBatch)
-│   ├── session_page.rs   # HTTP 会话 (16 方法)
+│   ├── chromium_page.rs  # CDP 浏览器控制 (160+ 方法)
+│   ├── element.rs        # 元素操作 (100+ 方法 + ElementBatch + Wait)
+│   ├── web_page.rs       # 统一双模式页 (80+ 方法)
+│   ├── session_page.rs   # HTTP 会话 (25+ 方法)
 │   ├── download.rs       # 下载管理 (13 方法)
 │   ├── network.rs        # 网络监控 (13 方法)
-│   ├── cookie_hub.rs     # Cookie 同步 + 文件 (10 方法)
-│   ├── config.rs         # 配置 (24 方法)
-│   ├── wait.rs           # 等待策略 (6 方法)
 │   ├── locator.rs        # 定位器解析 (6 方法)
+│   ├── config.rs         # 配置 (24 方法)
 │   ├── stealth.rs        # 反检测 (5 方法)
-│   └── error.rs          # 错误类型
-├── examples/             # 8 个示例
-└── tests/                # 72 个测试
+│   ├── cookie_hub.rs     # Cookie 同步 + 文件 (10 方法)
+│   ├── wait.rs           # 等待策略 (6 方法)
+│   ├── console.rs        # Console 捕获 (5 方法)
+│   ├── websocket.rs      # WebSocket 监听 (5 方法)
+│   ├── error.rs          # 错误类型
+│   ├── prelude.rs        # 预导入
+│   └── lib.rs            # 入口
+├── examples/             # 10 个示例
+└── tests/                # 21 个测试
 ```
 
 ## License

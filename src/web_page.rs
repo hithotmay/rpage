@@ -4,6 +4,7 @@
 //! and HTTP request mode with automatic cookie synchronization.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracing::info;
@@ -237,6 +238,28 @@ impl WebPage {
         }
     }
 
+    /// Find an element inside a Shadow DOM host (Chromium mode only).
+    ///
+    /// Usage: `page.shadow_ele("#host >>> .inner")`
+    pub async fn shadow_ele(&self, locator_str: &str) -> Result<Element> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("shadow_ele requires Chromium mode".into()))?
+            .shadow_ele(locator_str)
+            .await
+    }
+
+    /// Find all elements inside a Shadow DOM host (Chromium mode only).
+    ///
+    /// Usage: `page.shadow_eles("#host >>> .inner")`
+    pub async fn shadow_eles(&self, locator_str: &str) -> Result<Vec<Element>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("shadow_eles requires Chromium mode".into()))?
+            .shadow_eles(locator_str)
+            .await
+    }
+
     // ── Page info ────────────────────────────────────────────
 
     /// Page HTML.
@@ -377,6 +400,37 @@ impl WebPage {
         Ok(())
     }
 
+    // ── Connection status / reconnection (f30) ─────────────
+
+    /// Check if the browser connection is still alive (Chromium mode only).
+    ///
+    /// Returns `false` if there is no chromium instance or the browser is
+    /// no longer reachable via its debug URL.
+    pub fn is_connected(&self) -> bool {
+        self.chromium
+            .as_ref()
+            .map(|c| c.is_connected())
+            .unwrap_or(false)
+    }
+
+    /// Reconnect to the browser using the saved debug URL (Chromium mode only).
+    ///
+    /// Drops the current CDP connection and creates a fresh one to the same
+    /// debug endpoint. The browser must still be running for this to succeed.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        if let Some(ref mut c) = self.chromium {
+            c.reconnect().await?;
+        } else {
+            return Err(Error::Browser("no chromium instance to reconnect".into()));
+        }
+        Ok(())
+    }
+
+    /// Return the saved debug URL (e.g. `http://localhost:9222`) if in Chromium mode.
+    pub fn debug_url(&self) -> Option<&str> {
+        self.chromium.as_ref().map(|c| c.debug_url())
+    }
+
     // ── Scroll ────────────────────────────────────────────────
 
     /// Scroll page to absolute position.
@@ -475,6 +529,40 @@ impl WebPage {
             .await
     }
 
+    // ── Multi-window management (f26) ──────────────────────────
+
+    /// Return the `user_data_dir` configured for this instance (if any).
+    pub fn user_data_dir(&self) -> Option<&PathBuf> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("user_data_dir requires Chromium mode".into()))
+            .ok()
+            .and_then(|c| c.user_data_dir())
+    }
+
+    /// Read all cookies from `self` and write them into `other`.
+    pub async fn share_cookies_to(&self, other: &WebPage) -> Result<()> {
+        let src = self.chromium.as_ref().ok_or_else(|| {
+            Error::Browser("share_cookies_to source requires Chromium mode".into())
+        })?;
+        let dst = other.chromium.as_ref().ok_or_else(|| {
+            Error::Browser("share_cookies_to target requires Chromium mode".into())
+        })?;
+        src.share_cookies_to(dst).await
+    }
+
+    /// Clone this session: launch a new browser sharing the same user_data_dir.
+    pub async fn clone_session(&self) -> Result<WebPage> {
+        let src = self
+            .chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("clone_session requires Chromium mode".into()))?;
+        let cloned = src.clone_session().await?;
+        let mut wp = WebPage::with_options(self.opts.clone()).await?;
+        wp.chromium = Some(cloned);
+        Ok(wp)
+    }
+
     // ── Cookies (read/set already exist, add tabs) ────────────
 
     /// Get all open tabs.
@@ -558,6 +646,32 @@ impl WebPage {
             .await
     }
 
+    /// Register a named init script that runs on every new document.
+    pub async fn add_init_script(&self, name: &str, js: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("add_init_script requires Chromium mode".into()))?
+            .add_init_script(name, js)
+            .await
+    }
+
+    /// Remove a previously registered named init script.
+    pub async fn remove_init_script(&self, name: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("remove_init_script requires Chromium mode".into()))?
+            .remove_init_script(name)
+            .await
+    }
+
+    /// List all registered init script names.
+    pub fn list_init_scripts(&self) -> Vec<String> {
+        self.chromium
+            .as_ref()
+            .map(|c| c.list_init_scripts())
+            .unwrap_or_default()
+    }
+
     // ── Press / PDF / Viewport (Chromium only) ──────────────
 
     /// Press a key at page level.
@@ -569,12 +683,34 @@ impl WebPage {
             .await
     }
 
-    /// Export page to PDF.
+    /// Export page to PDF with default options (backward compatible).
     pub async fn pdf(&self, path: &str) -> Result<()> {
         self.chromium
             .as_ref()
             .ok_or_else(|| Error::Browser("pdf requires Chromium mode".into()))?
             .pdf(path)
+            .await
+    }
+
+    /// Export page to PDF with custom options and save to `path`.
+    pub async fn pdf_to_file(
+        &self,
+        path: &str,
+        opts: crate::chromium_page::PdfOptions,
+    ) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("pdf_to_file requires Chromium mode".into()))?
+            .pdf_to_file(path, opts)
+            .await
+    }
+
+    /// Export page to PDF with custom options and return raw bytes.
+    pub async fn pdf_bytes(&self, opts: crate::chromium_page::PdfOptions) -> Result<Vec<u8>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("pdf_bytes requires Chromium mode".into()))?
+            .pdf_bytes(opts)
             .await
     }
 
@@ -654,6 +790,20 @@ impl WebPage {
             .as_ref()
             .ok_or_else(|| Error::Browser("set_user_agent requires Chromium mode".into()))?
             .set_user_agent(user_agent)
+            .await
+    }
+
+    /// Set proxy authentication (Chromium only).
+    ///
+    /// Configures `Proxy-Authorization: Basic <base64(user:pass)>` via
+    /// `Network.setExtraHTTPHeaders`. The browser must have been launched
+    /// with `--proxy-server` (e.g. via `ChromiumOptions::proxy`) for this
+    /// to take effect.
+    pub async fn set_proxy_auth(&self, user: &str, pass: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_proxy_auth requires Chromium mode".into()))?
+            .set_proxy_auth(user, pass)
             .await
     }
 
@@ -749,6 +899,52 @@ impl WebPage {
         self.chromium.as_ref().map(|c| c.network_monitor())
     }
 
+    /// Get all captured console log entries (Chromium mode only).
+    pub fn console_log(&self) -> Vec<crate::console::ConsoleEntry> {
+        self.chromium
+            .as_ref()
+            .map(|c| c.console_log())
+            .unwrap_or_default()
+    }
+
+    /// Get all captured JS exceptions (Chromium mode only).
+    pub fn console_exceptions(&self) -> Vec<crate::console::JsException> {
+        self.chromium
+            .as_ref()
+            .map(|c| c.console_exceptions())
+            .unwrap_or_default()
+    }
+
+    /// Clear all captured console entries and exceptions (Chromium mode only).
+    pub fn clear_console(&self) {
+        if let Some(ref c) = self.chromium {
+            c.clear_console();
+        }
+    }
+
+    /// Get all captured WebSocket frames (Chromium mode only).
+    pub fn ws_frames(&self) -> Vec<crate::websocket::WsFrame> {
+        self.chromium
+            .as_ref()
+            .map(|c| c.ws_frames())
+            .unwrap_or_default()
+    }
+
+    /// Get all captured WebSocket lifecycle events (Chromium mode only).
+    pub fn ws_events(&self) -> Vec<crate::websocket::WsEvent> {
+        self.chromium
+            .as_ref()
+            .map(|c| c.ws_events())
+            .unwrap_or_default()
+    }
+
+    /// Clear all captured WebSocket frames and events (Chromium mode only).
+    pub fn clear_ws_frames(&self) {
+        if let Some(ref c) = self.chromium {
+            c.clear_ws_frames();
+        }
+    }
+
     /// Create an ActionChain for complex multi-step input sequences.
     ///
     /// ```ignore
@@ -808,6 +1004,276 @@ impl WebPage {
             .as_ref()
             .ok_or_else(|| Error::Browser("Not in Chromium mode".into()))?
             .wait_js(expression, timeout_secs)
+            .await
+    }
+
+    // ── Performance metrics (Chromium only) ──────────────────
+
+    /// Grant browser permissions for the given origin (Chromium only).
+    ///
+    /// ```ignore
+    /// page.grant_permissions("https://example.com", vec![
+    ///     "geolocation".into(),
+    ///     "notifications".into(),
+    /// ]).await?;
+    /// ```
+    pub async fn grant_permissions(&self, origin: &str, permissions: Vec<String>) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("grant_permissions requires Chromium mode".into()))?
+            .grant_permissions(origin, permissions)
+            .await
+    }
+
+    /// Reset all browser permission overrides (Chromium only).
+    ///
+    /// ```ignore
+    /// page.reset_permissions().await?;
+    /// ```
+    pub async fn reset_permissions(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("reset_permissions requires Chromium mode".into()))?
+            .reset_permissions()
+            .await
+    }
+
+    /// Retrieve current CDP performance metrics.
+    ///
+    /// Returns a list of `(name, value)` pairs from the browser's
+    /// Performance domain (Timestamp, Documents, Frames, …).
+    pub async fn performance_metrics(&self) -> Result<Vec<(String, f64)>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("performance_metrics requires Chromium mode".into()))?
+            .performance_metrics()
+            .await
+    }
+
+    /// Extract page-load timing via `performance.timing`.
+    ///
+    /// Returns a `HashMap` with keys `dns`, `tcp`, `request`, `response`,
+    /// `dom`, `load`, `domInteractive`, `domContentLoaded` (values in ms).
+    pub async fn page_timing(&self) -> Result<std::collections::HashMap<String, f64>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("page_timing requires Chromium mode".into()))?
+            .page_timing()
+            .await
+    }
+
+    // ── Device emulation (f22, Chromium only) ─────────────────
+
+    /// Override the browser's geolocation (Chromium only).
+    pub async fn set_geolocation(&self, lat: f64, lng: f64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_geolocation requires Chromium mode".into()))?
+            .set_geolocation(lat, lng)
+            .await
+    }
+
+    /// Override the browser's timezone (Chromium only).
+    pub async fn set_timezone(&self, tz: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_timezone requires Chromium mode".into()))?
+            .set_timezone(tz)
+            .await
+    }
+
+    /// Emulate a device by setting viewport, scale factor, touch mode, and user agent (Chromium only).
+    pub async fn emulate_device(
+        &self,
+        width: u32,
+        height: u32,
+        ua: &str,
+        scale: f64,
+        touch: bool,
+    ) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("emulate_device requires Chromium mode".into()))?
+            .emulate_device(width, height, ua, scale, touch)
+            .await
+    }
+
+    // ── File chooser (f25) ────────────────────────────────────
+
+    /// Enable or disable interception of file chooser dialogs (Chromium only).
+    pub async fn set_file_chooser(&self, enabled: bool) {
+        if let Some(ref c) = self.chromium {
+            c.set_file_chooser(enabled).await;
+        }
+    }
+
+    /// Wait for a file chooser dialog event within the given timeout (Chromium only).
+    pub async fn wait_file_chooser(
+        &self,
+        timeout_secs: u64,
+    ) -> Result<crate::chromium_page::FileChooserInfo> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_file_chooser requires Chromium mode".into()))?
+            .wait_file_chooser(timeout_secs)
+            .await
+    }
+
+    // ── Audio control (f34) ──────────────────────────────────
+
+    /// Mute all audio on the page (Chromium only).
+    pub async fn mute(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("mute requires Chromium mode".into()))?
+            .mute()
+            .await
+    }
+
+    /// Unmute audio on the page (Chromium only).
+    pub async fn unmute(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("unmute requires Chromium mode".into()))?
+            .unmute()
+            .await
+    }
+
+    // ── DOM Snapshot (f31) ────────────────────────────────────
+
+    /// Capture a full DOM snapshot of the current page as a JSON tree (Chromium only).
+    ///
+    /// Each node is represented as `{ type, name, attrs?, children?, value? }`.
+    pub async fn dom_snapshot(&self) -> Result<serde_json::Value> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("dom_snapshot requires Chromium mode".into()))?
+            .dom_snapshot()
+            .await
+    }
+
+    // ── Clipboard (f32) ──────────────────────────────────────
+
+    /// Read text from the clipboard (Chromium only).
+    ///
+    /// The page must be focused and have clipboard-read permission.
+    /// Use `grant_permissions` if needed.
+    pub async fn clipboard_read(&self) -> Result<String> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("clipboard_read requires Chromium mode".into()))?
+            .clipboard_read()
+            .await
+    }
+
+    /// Write text to the clipboard (Chromium only).
+    ///
+    /// The page must be focused and have clipboard-write permission.
+    /// Use `grant_permissions` if needed.
+    pub async fn clipboard_write(&self, text: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("clipboard_write requires Chromium mode".into()))?
+            .clipboard_write(text)
+            .await
+    }
+
+    // ── CSS override (f35) ──────────────────────────────────────
+
+    /// Inject a `<style>` tag into the page and return its generated ID (Chromium only).
+    ///
+    /// The returned ID can later be passed to `remove_css` to delete the tag.
+    pub async fn inject_css(&self, css: &str) -> Result<String> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("inject_css requires Chromium mode".into()))?
+            .inject_css(css)
+            .await
+    }
+
+    /// Remove a previously injected `<style>` tag by its ID (Chromium only).
+    pub async fn remove_css(&self, id: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("remove_css requires Chromium mode".into()))?
+            .remove_css(id)
+            .await
+    }
+
+    // ── Load strategy ────────────────────────────────────────
+
+    /// Set the page load strategy (Chromium only).
+    ///
+    /// Controls how `get()` waits after navigation:
+    /// - `"normal"` — wait for the full `load` event (default)
+    /// - `"eager"` — wait for `DOMContentLoaded` only
+    /// - `"none"` — return immediately after navigation
+    pub fn set_load_strategy(&mut self, strategy: &str) {
+        if let Some(c) = self.chromium.as_mut() {
+            c.set_load_strategy(strategy);
+        }
+    }
+
+    /// Get the current load strategy (Chromium only).
+    ///
+    /// Returns `"normal"`, `"eager"`, or `"none"`.
+    pub fn load_strategy(&self) -> Option<&str> {
+        self.chromium.as_ref().map(|c| c.load_strategy())
+    }
+
+    // ── Window management ─────────────────────────────────────
+
+    /// Get the current browser window's bounds as `(left, top, width, height)` (Chromium only).
+    pub async fn get_window_bounds(&self) -> Result<(i32, i32, u32, u32)> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("get_window_bounds requires Chromium mode".into()))?
+            .get_window_bounds()
+            .await
+    }
+
+    /// Set the window position (top-left corner) (Chromium only).
+    pub async fn set_window_position(&self, left: i32, top: i32) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_window_position requires Chromium mode".into()))?
+            .set_window_position(left, top)
+            .await
+    }
+
+    /// Set the window size (width × height) (Chromium only).
+    pub async fn set_window_size(&self, width: u32, height: u32) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("set_window_size requires Chromium mode".into()))?
+            .set_window_size(width, height)
+            .await
+    }
+
+    /// Minimize the browser window (Chromium only).
+    pub async fn minimize(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("minimize requires Chromium mode".into()))?
+            .minimize()
+            .await
+    }
+
+    /// Maximize the browser window (Chromium only).
+    pub async fn maximize(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("maximize requires Chromium mode".into()))?
+            .maximize()
+            .await
+    }
+
+    /// Set the browser window to fullscreen (Chromium only).
+    pub async fn fullscreen(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("fullscreen requires Chromium mode".into()))?
+            .fullscreen()
             .await
     }
 }

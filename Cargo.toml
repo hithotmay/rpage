@@ -9,7 +9,7 @@ repository = "https://github.com/hithotmay/rpage"
 [dependencies]
 chromiumoxide = { version = "0.9", features = ["fetcher", "zip0"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.13", features = ["json", "cookies", "gzip", "brotli", "deflate", "stream", "multipart"] }
+reqwest = { version = "0.13", features = ["json", "cookies", "gzip", "brotli", "deflate", "stream", "multipart", "blocking"] }
 reqwest_cookie_store = "0.10"
 cookie_store = "0.22"
 scraper = "0.27"
@@ -23,6 +23,7 @@ tokio-stream = "0.1"
 sxd-document = "0.3"
 sxd-xpath = "0.4"
 tracing = "0.1"
+base64 = "0.22"
 
 [[example]]
 name = "basic"

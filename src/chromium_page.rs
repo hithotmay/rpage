@@ -3,21 +3,217 @@
 //! Uses `chromiumoxide` to drive Chrome/Chromium. Stealth mode is enabled
 //! by default to avoid bot-detection.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::network::CookieParam;
+use chromiumoxide::cdp::browser_protocol::page::{
+    AddScriptToEvaluateOnNewDocumentParams, RemoveScriptToEvaluateOnNewDocumentParams,
+    ScriptIdentifier,
+};
 use chromiumoxide::Page;
 use futures::StreamExt;
 use tracing::{debug, info};
 
 use crate::config::ChromiumOptions;
+use crate::console::ConsoleMonitor;
 use crate::download::DownloadManager;
 use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::locator::locator_to_selector;
+use crate::websocket::WebSocketMonitor;
+
+/// Options for PDF export via CDP `Page.printToPDF`.
+///
+/// All dimension fields use **inches**. Unset fields use the browser's default
+/// (letter paper 8.5×11 in, ~0.4 in margins, scale 1.0).
+///
+/// ```ignore
+/// use rpage::PdfOptions;
+/// let opts = PdfOptions::builder()
+///     .paper_width(8.5)
+///     .paper_height(11.0)
+///     .print_background(true)
+///     .landscape(false)
+///     .build();
+/// page.pdf_to_file("out.pdf", opts).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct PdfOptions {
+    /// Paper width in inches (default 8.5).
+    pub paper_width: Option<f64>,
+    /// Paper height in inches (default 11).
+    pub paper_height: Option<f64>,
+    /// Top margin in inches (default ~0.4).
+    pub margin_top: Option<f64>,
+    /// Bottom margin in inches.
+    pub margin_bottom: Option<f64>,
+    /// Left margin in inches.
+    pub margin_left: Option<f64>,
+    /// Right margin in inches.
+    pub margin_right: Option<f64>,
+    /// Print background graphics (default true).
+    pub print_background: bool,
+    /// Landscape orientation (default false).
+    pub landscape: bool,
+    /// Display header and footer (default false).
+    pub display_header_footer: bool,
+    /// HTML template for the print header.
+    pub header_template: Option<String>,
+    /// HTML template for the print footer.
+    pub footer_template: Option<String>,
+    /// Scale of the webpage rendering (default 1.0).
+    pub scale: Option<f64>,
+    /// Paper ranges to print, e.g. `"1-5, 8"`.
+    pub page_ranges: Option<String>,
+}
+
+impl Default for PdfOptions {
+    fn default() -> Self {
+        Self {
+            paper_width: None,
+            paper_height: None,
+            margin_top: None,
+            margin_bottom: None,
+            margin_left: None,
+            margin_right: None,
+            print_background: true,
+            landscape: false,
+            display_header_footer: false,
+            header_template: None,
+            footer_template: None,
+            scale: None,
+            page_ranges: None,
+        }
+    }
+}
+
+impl PdfOptions {
+    /// Create a builder initialised with defaults.
+    pub fn builder() -> PdfOptionsBuilder {
+        PdfOptionsBuilder::default()
+    }
+
+    /// Convert these options into CDP `PrintToPdfParams`.
+    #[allow(dead_code)]
+    fn to_cdp_params(&self) -> chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams {
+        let mut b = chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams::builder();
+        if let Some(v) = self.paper_width {
+            b = b.paper_width(v);
+        }
+        if let Some(v) = self.paper_height {
+            b = b.paper_height(v);
+        }
+        if let Some(v) = self.margin_top {
+            b = b.margin_top(v);
+        }
+        if let Some(v) = self.margin_bottom {
+            b = b.margin_bottom(v);
+        }
+        if let Some(v) = self.margin_left {
+            b = b.margin_left(v);
+        }
+        if let Some(v) = self.margin_right {
+            b = b.margin_right(v);
+        }
+        if self.print_background {
+            b = b.print_background(true);
+        }
+        if self.landscape {
+            b = b.landscape(true);
+        }
+        if self.display_header_footer {
+            b = b.display_header_footer(true);
+        }
+        if let Some(ref v) = self.header_template {
+            b = b.header_template(v.clone());
+        }
+        if let Some(ref v) = self.footer_template {
+            b = b.footer_template(v.clone());
+        }
+        if let Some(v) = self.scale {
+            b = b.scale(v);
+        }
+        if let Some(ref v) = self.page_ranges {
+            b = b.page_ranges(v.clone());
+        }
+        b.build()
+    }
+}
+
+/// Builder for [`PdfOptions`].
+#[derive(Default)]
+pub struct PdfOptionsBuilder {
+    inner: PdfOptions,
+}
+
+impl PdfOptionsBuilder {
+    pub fn paper_width(mut self, v: f64) -> Self {
+        self.inner.paper_width = Some(v);
+        self
+    }
+    pub fn paper_height(mut self, v: f64) -> Self {
+        self.inner.paper_height = Some(v);
+        self
+    }
+    pub fn margin_top(mut self, v: f64) -> Self {
+        self.inner.margin_top = Some(v);
+        self
+    }
+    pub fn margin_bottom(mut self, v: f64) -> Self {
+        self.inner.margin_bottom = Some(v);
+        self
+    }
+    pub fn margin_left(mut self, v: f64) -> Self {
+        self.inner.margin_left = Some(v);
+        self
+    }
+    pub fn margin_right(mut self, v: f64) -> Self {
+        self.inner.margin_right = Some(v);
+        self
+    }
+    pub fn print_background(mut self, v: bool) -> Self {
+        self.inner.print_background = v;
+        self
+    }
+    pub fn landscape(mut self, v: bool) -> Self {
+        self.inner.landscape = v;
+        self
+    }
+    pub fn display_header_footer(mut self, v: bool) -> Self {
+        self.inner.display_header_footer = v;
+        self
+    }
+    pub fn header_template(mut self, v: impl Into<String>) -> Self {
+        self.inner.header_template = Some(v.into());
+        self
+    }
+    pub fn footer_template(mut self, v: impl Into<String>) -> Self {
+        self.inner.footer_template = Some(v.into());
+        self
+    }
+    pub fn scale(mut self, v: f64) -> Self {
+        self.inner.scale = Some(v);
+        self
+    }
+    pub fn page_ranges(mut self, v: impl Into<String>) -> Self {
+        self.inner.page_ranges = Some(v.into());
+        self
+    }
+    pub fn build(self) -> PdfOptions {
+        self.inner
+    }
+}
+
+/// Information from a file chooser dialog event.
+#[derive(Debug, Clone)]
+pub struct FileChooserInfo {
+    pub backend_node_id: u64,
+    pub mode: String,
+}
 
 /// Cookie info extracted from the browser.
 #[derive(Debug, Clone)]
@@ -81,8 +277,17 @@ pub struct ChromiumPage {
     browser: Browser,
     page: Page,
     opts: ChromiumOptions,
+    debug_url: String,
     download_manager: Arc<DownloadManager>,
     network_monitor: Arc<crate::network::NetworkMonitor>,
+    console_monitor: Arc<ConsoleMonitor>,
+    ws_monitor: Arc<WebSocketMonitor>,
+    /// Named init scripts: name → JS source
+    init_scripts: Arc<Mutex<HashMap<String, String>>>,
+    /// Named init scripts: name → CDP-returned identifier
+    init_script_ids: Arc<Mutex<HashMap<String, ScriptIdentifier>>>,
+    /// Load strategy: "normal" | "eager" | "none"
+    load_strategy: String,
 }
 
 impl ChromiumPage {
@@ -112,6 +317,7 @@ impl ChromiumPage {
             true,
             false,
             &[],
+            ChromiumOptions::default(),
         )
         .await
     }
@@ -144,6 +350,7 @@ impl ChromiumPage {
             opts.disable_gpu,
             opts.no_sandbox,
             &opts.extension_dirs,
+            opts.clone(),
         )
         .await?;
 
@@ -167,6 +374,11 @@ impl ChromiumPage {
             crate::network::set_user_agent(&page.page, &user_agent).await?;
         }
 
+        // Apply proxy authentication if specified
+        if let Some((ref user, ref pass)) = opts.proxy_auth {
+            page.set_proxy_auth(user, pass).await?;
+        }
+
         Ok(page)
     }
     #[allow(clippy::too_many_arguments)]
@@ -180,8 +392,9 @@ impl ChromiumPage {
         disable_gpu: bool,
         no_sandbox: bool,
         extension_dirs: &[PathBuf],
+        opts: ChromiumOptions,
     ) -> Result<Self> {
-        let debug_url = format!("http://localhost:{port}");
+        let debug_url = format!("http://127.0.0.1:{port}");
 
         // Check if a browser is already listening on this port
         let already_running = reqwest::get(format!("{debug_url}/json/version"))
@@ -251,7 +464,7 @@ impl ChromiumPage {
         }
 
         // Connect via CDP
-        Self::connect(&debug_url).await
+        Self::connect_with_opts(&debug_url, opts).await
     }
 
     /// Poll the debug port until Chrome is ready (max 10s).
@@ -289,6 +502,11 @@ impl ChromiumPage {
     /// `HeadlessChrome` UA、`navigator.webdriver` 等标记，
     /// 所有网站（包括百度）都不会触发验证码。
     pub async fn connect(debug_url: &str) -> Result<Self> {
+        Self::connect_with_opts(debug_url, ChromiumOptions::default()).await
+    }
+
+    /// Connect to a running browser and store the given options.
+    pub async fn connect_with_opts(debug_url: &str, opts: ChromiumOptions) -> Result<Self> {
         info!("Connecting to existing browser at {debug_url}");
 
         let (browser, handler) = Browser::connect(debug_url)
@@ -324,19 +542,27 @@ impl ChromiumPage {
 
         info!("Connected to existing browser — zero automation flags");
         let nm = Arc::new(crate::network::NetworkMonitor::new());
-        let page_clone = page.clone();
-        let nm_clone = nm.clone();
         let dm_clone = Arc::new(DownloadManager::new());
-        // Auto-monitor network events
-        let _ = crate::network::enable_network(&page_clone).await;
-        if let Ok(mut rx) = page_clone.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent>().await {
+
+        // ── Safe event initialization ──
+        // NOTE: All CDP commands and event_listener registrations are wrapped in
+        // timeouts to prevent a single broken CDP domain from deadlocking the entire
+        // connection.  Chrome 149+ has deprecated `Browser.setDownloadBehavior`, so we
+        // skip it entirely and rely on event listeners alone.
+        let init_timeout = std::time::Duration::from_secs(3);
+
+        // Network.enable — needed for request/download/WebSocket events
+        let pc = page.clone();
+        let nm1 = nm.clone();
+        let _ = tokio::time::timeout(init_timeout, crate::network::enable_network(&pc)).await;
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent>()).await {
             tokio::spawn(async move {
                 while let Some(ev) = rx.next().await {
                     let mut hdrs = std::collections::HashMap::new();
                     if let Some(obj) = ev.request.headers.inner().as_object() {
                         for (k, v) in obj { hdrs.insert(k.clone(), v.as_str().unwrap_or_default().to_string()); }
                     }
-                    nm_clone.record_request(crate::network::RequestRecord {
+                    nm1.record_request(crate::network::RequestRecord {
                         request_id: ev.request_id.clone().into(),
                         url: ev.request.url.clone(),
                         method: ev.request.method.clone(),
@@ -347,71 +573,223 @@ impl ChromiumPage {
             });
         }
 
-        // Enable download events and auto-monitor (f11: CDP download listening)
-        if let Ok(params) = chromiumoxide::cdp::browser_protocol::browser::SetDownloadBehaviorParams::builder()
-            .behavior(chromiumoxide::cdp::browser_protocol::browser::SetDownloadBehaviorBehavior::AllowAndName)
-            .events_enabled(true)
-            .build()
-        {
-            let _ = page_clone.execute(params).await;
-        }
-        let dm_for_begin = dm_clone.clone();
-        let dm_for_progress = dm_clone.clone();
-        if let Ok(mut rx) = page_clone.event_listener::<chromiumoxide::cdp::browser_protocol::browser::EventDownloadWillBegin>().await {
+        // Download monitoring — listen for events without SetDownloadBehavior
+        // (Chrome 149+ removed setDownloadBehavior; events fire regardless)
+        let dm1 = dm_clone.clone();
+        let dm2 = dm_clone.clone();
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::browser::EventDownloadWillBegin>()).await {
             tokio::spawn(async move {
                 while let Some(ev) = rx.next().await {
-                    let id = dm_for_begin.register(&ev.url, &ev.suggested_filename);
+                    let id = dm1.register(&ev.url, &ev.suggested_filename);
                     debug!("Download started: guid={} id={} file={}", ev.guid, id, ev.suggested_filename);
                 }
             });
         }
-        if let Ok(mut rx) = page_clone
-            .event_listener::<chromiumoxide::cdp::browser_protocol::browser::EventDownloadProgress>(
-            )
-            .await
-        {
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::browser::EventDownloadProgress>()).await {
             tokio::spawn(async move {
                 while let Some(ev) = rx.next().await {
                     use chromiumoxide::cdp::browser_protocol::browser::DownloadProgressState;
                     let guid = &ev.guid;
                     match ev.state {
                         DownloadProgressState::InProgress => {
-                            dm_for_progress.update_progress(guid, ev.received_bytes as u64);
+                            dm2.update_progress(guid, ev.received_bytes as u64);
                         }
                         DownloadProgressState::Completed => {
                             let save = ev.file_path.as_deref().unwrap_or("");
-                            dm_for_progress.complete(guid, std::path::Path::new(save));
+                            dm2.complete(guid, std::path::Path::new(save));
                         }
                         DownloadProgressState::Canceled => {
-                            dm_for_progress.cancel(guid);
+                            dm2.cancel(guid);
                         }
                     }
                 }
             });
         }
+
+        // Runtime.enable — console + exception monitoring
+        let cm = Arc::new(ConsoleMonitor::new());
+        let cm1 = cm.clone();
+        let cm2 = cm.clone();
+        let _ = tokio::time::timeout(init_timeout, crate::console::enable_runtime(&pc)).await;
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(
+            init_timeout,
+            pc.event_listener::<chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled>(),
+        )
+        .await
+        {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    let level = crate::console::cdp_type_to_level(&ev.r#type);
+                    let text_parts: Vec<String> = ev
+                        .args
+                        .iter()
+                        .map(|arg| {
+                            arg.value
+                                .as_ref()
+                                .map(|v| v.to_string().trim_matches('"').to_string())
+                                .unwrap_or_else(|| arg.description.clone().unwrap_or_default())
+                        })
+                        .collect();
+                    let text = text_parts.join(" ");
+                    let ts = *ev.timestamp.inner();
+                    cm1.add_log(crate::console::ConsoleEntry {
+                        level,
+                        text,
+                        timestamp: ts,
+                    });
+                }
+            });
+        }
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(
+            init_timeout,
+            pc.event_listener::<chromiumoxide::cdp::js_protocol::runtime::EventExceptionThrown>(),
+        )
+        .await
+        {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    let details = &ev.exception_details;
+                    let stack_trace = details
+                        .stack_trace
+                        .as_ref()
+                        .map(crate::console::format_stack_trace);
+                    let ts = *ev.timestamp.inner();
+                    cm2.add_exception(crate::console::JsException {
+                        text: details.text.clone(),
+                        url: details.url.clone(),
+                        line: details.line_number,
+                        column: details.column_number,
+                        stack_trace,
+                        timestamp: ts,
+                    });
+                }
+            });
+        }
+
+        // WebSocket monitoring — uses Network domain (already enabled above)
+        let ws = Arc::new(WebSocketMonitor::new());
+        let ws1 = ws.clone();
+        let ws2 = ws.clone();
+        let ws3 = ws.clone();
+        let ws4 = ws.clone();
+        let ws5 = ws.clone();
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventWebSocketFrameSent>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    ws1.add_frame(crate::websocket::WsFrame {
+                        request_id: ev.request_id.clone().into(),
+                        timestamp: *ev.timestamp.inner(),
+                        opcode: ev.response.opcode.to_string(),
+                        payload: ev.response.payload_data.clone(),
+                        is_sent: true,
+                    });
+                }
+            });
+        }
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventWebSocketFrameReceived>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    ws2.add_frame(crate::websocket::WsFrame {
+                        request_id: ev.request_id.clone().into(),
+                        timestamp: *ev.timestamp.inner(),
+                        opcode: ev.response.opcode.to_string(),
+                        payload: ev.response.payload_data.clone(),
+                        is_sent: false,
+                    });
+                }
+            });
+        }
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventWebSocketCreated>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    ws3.add_event(crate::websocket::WsEvent::Created { request_id: ev.request_id.clone().into(), url: ev.url.clone() });
+                }
+            });
+        }
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventWebSocketClosed>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    ws4.add_event(crate::websocket::WsEvent::Closed { request_id: ev.request_id.clone().into(), timestamp: *ev.timestamp.inner() });
+                }
+            });
+        }
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventWebSocketFrameError>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    ws5.add_event(crate::websocket::WsEvent::Error { request_id: ev.request_id.clone().into(), timestamp: *ev.timestamp.inner(), error_message: ev.error_message.clone() });
+                }
+            });
+        }
+
         Ok(Self {
             browser,
             page,
-            opts: ChromiumOptions::default(),
+            opts,
+            debug_url: debug_url.to_string(),
             download_manager: dm_clone,
             network_monitor: nm,
+            console_monitor: cm,
+            ws_monitor: ws,
+            init_scripts: Arc::new(Mutex::new(HashMap::new())),
+            init_script_ids: Arc::new(Mutex::new(HashMap::new())),
+            load_strategy: "normal".into(),
         })
     }
 
     // ── Navigation (auto-wait for page load) ────────────────
 
     /// Navigate to a URL. Automatically waits for page to finish loading.
+    ///
+    /// The wait behavior is controlled by the load strategy:
+    /// - `"normal"` (default): waits for the `load` event (full page load)
+    /// - `"eager"`: waits for `DOMContentLoaded` only (DOM ready, images may still load)
+    /// - `"none"`: no wait after navigation — returns immediately
+    ///
+    /// Use `set_load_strategy()` to change the strategy at runtime.
     pub async fn get(&self, url: &str) -> Result<()> {
-        debug!("get({url})");
+        debug!("get({url}) [strategy={}]", self.load_strategy);
         self.page
             .goto(url)
             .await
             .map_err(|e| Error::Browser(format!("navigate: {e}")))?;
-        // Wait for DOMContentLoaded
-        self.page
-            .wait_for_navigation_response()
-            .await
-            .map_err(|e| Error::Browser(format!("wait for load: {e}")))?;
+
+        match self.load_strategy.as_str() {
+            "none" => {
+                // Fire-and-forget: just wait a tiny bit for the navigation to
+                // actually be dispatched, but don't block on load events.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            "eager" => {
+                // Wait for DOMContentLoaded via JS polling
+                let js = "document.readyState === 'interactive' || document.readyState === 'complete'";
+                let timeout_secs = 15u64;
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                loop {
+                    let ready = self
+                        .page
+                        .evaluate(js)
+                        .await
+                        .ok()
+                        .and_then(|r| r.value().cloned())
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if ready {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+            _ => {
+                // "normal" — default: wait for full load event
+                self.page
+                    .wait_for_navigation_response()
+                    .await
+                    .map_err(|e| Error::Browser(format!("wait for load: {e}")))?;
+            }
+        }
         Ok(())
     }
 
@@ -472,6 +850,45 @@ impl ChromiumPage {
             .await
             .map_err(|e| Error::Browser(format!("close: {e}")))?;
         Ok(())
+    }
+
+    // ── Connection status / reconnection (f30) ───────────
+
+    /// Check if the browser connection is still alive.
+    ///
+    /// Tries to fetch `/json/version` from the saved debug URL.
+    /// Returns `true` if the browser responds, `false` otherwise.
+    pub fn is_connected(&self) -> bool {
+        // Synchronous check: use a minimal HTTP request via reqwest blocking.
+        // Since reqwest::blocking might not be available, we do a quick
+        // websocket-level check by seeing if the browser inner is still valid.
+        // The simplest reliable way: try an HTTP GET to the debug URL.
+        let url = format!("{}/json/version", self.debug_url);
+        reqwest::blocking::get(&url).is_ok()
+    }
+
+    /// Reconnect to the browser using the saved debug URL.
+    ///
+    /// Drops the current browser/page and creates a fresh CDP connection
+    /// to the same debug endpoint. Useful when the WebSocket connection
+    /// was lost but the browser is still running.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        info!("Reconnecting to browser at {}", self.debug_url);
+        let new = Self::connect(&self.debug_url).await?;
+        self.browser = new.browser;
+        self.page = new.page;
+        self.download_manager = new.download_manager;
+        self.network_monitor = new.network_monitor;
+        self.console_monitor = new.console_monitor;
+        self.ws_monitor = new.ws_monitor;
+        self.init_scripts = new.init_scripts;
+        self.init_script_ids = new.init_script_ids;
+        Ok(())
+    }
+
+    /// Return the saved debug URL (e.g. `http://localhost:9222`).
+    pub fn debug_url(&self) -> &str {
+        &self.debug_url
     }
 
     // ── Element finding (auto-retry + batch extract) ─────────
@@ -593,6 +1010,230 @@ impl ChromiumPage {
         Ok(results)
     }
 
+    // ── Shadow DOM piercing ──────────────────────────────────
+
+    /// Find an element inside a Shadow DOM host.
+    ///
+    /// Usage: `page.shadow_ele("#host >>> .inner")` — finds `#host`, then
+    /// penetrates its shadowRoot and runs `querySelector(".inner")`.
+    ///
+    /// For multi-level piercing use `>>>` separator:
+    /// `page.shadow_ele("#host >>> .mid >>> .inner")`
+    pub async fn shadow_ele(&self, locator_str: &str) -> Result<Element> {
+        let parts: Vec<&str> = locator_str.split(">>>").map(|s| s.trim()).collect();
+        if parts.len() < 2 {
+            return Err(Error::InvalidLocator(
+                "shadow_ele requires at least 'host >>> inner' format".into(),
+            ));
+        }
+
+        let host_sel = serde_json::to_string(parts[0]).unwrap();
+        let inner_sels: Vec<String> = parts[1..]
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .collect();
+
+        // Build recursive JS for shadow DOM piercing
+        let query_js = build_shadow_query_js(&host_sel, &inner_sels);
+
+        let timeout_secs = self.opts.timeout.as_secs();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        #[allow(unused_assignments)]
+        let mut last_err = String::from("timeout");
+
+        loop {
+            match self.build_element_from_shadow_js(&query_js).await {
+                Ok(el) => return Ok(el),
+                Err(e) => {
+                    last_err = format!("{e}");
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        Err(Error::ElementNotFound(format!(
+            "shadow_ele not found after {timeout_secs}s: {last_err}"
+        )))
+    }
+
+    /// Find all elements inside a Shadow DOM host.
+    ///
+    /// Usage: `page.shadow_eles("#host >>> .inner")`
+    pub async fn shadow_eles(&self, locator_str: &str) -> Result<Vec<Element>> {
+        let parts: Vec<&str> = locator_str.split(">>>").map(|s| s.trim()).collect();
+        if parts.len() < 2 {
+            return Err(Error::InvalidLocator(
+                "shadow_eles requires at least 'host >>> inner' format".into(),
+            ));
+        }
+
+        let host_sel = serde_json::to_string(parts[0]).unwrap();
+        let inner_sels: Vec<String> = parts[1..]
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .collect();
+
+        let query_js = build_shadow_query_all_js(&host_sel, &inner_sels);
+
+        let timeout_secs = self.opts.timeout.as_secs();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            match self.shadow_eles_from_js(&query_js).await {
+                Ok(els) => {
+                    if !els.is_empty() || tokio::time::Instant::now() >= deadline {
+                        return Ok(els);
+                    }
+                }
+                Err(_) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Build an Element from shadow DOM JS query (single element).
+    async fn build_element_from_shadow_js(&self, query_js: &str) -> Result<Element> {
+        let full_js = format!(
+            "(function() {{ \
+               var el = ({query_js}); \
+               if (!el) return null; \
+               var r = {{}}; \
+               r.html = el.outerHTML; \
+               r.tag = el.tagName.toLowerCase(); \
+               r.text = el.innerText || ''; \
+               var attrs = []; \
+               for (var i = 0; i < el.attributes.length; i++) {{ \
+                 var a = el.attributes[i]; \
+                 attrs.push([a.name, a.value]); \
+               }} \
+               r.attrs = attrs; \
+               return JSON.stringify(r); \
+             }})()"
+        );
+
+        let result = self
+            .page
+            .evaluate(full_js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("shadow query: {e}")))?;
+
+        let json_str = result
+            .value()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ElementNotFound("shadow element not found".into()))?;
+
+        let data: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| Error::Browser(format!("parse shadow result: {e}")))?;
+
+        let html = data["html"].as_str().unwrap_or_default().to_string();
+        let tag = data["tag"].as_str().unwrap_or_default().to_string();
+        let text = data["text"].as_str().unwrap_or_default().to_string();
+        let attrs: Vec<(String, String)> = data["attrs"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let a = item.as_array()?;
+                        Some((
+                            a.first()?.as_str()?.to_string(),
+                            a.get(1)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let locator = crate::locator::Locator::Css("shadow".into());
+        Ok(Element::new_cdp(
+            self.page.clone(),
+            String::new(), // no direct object_id from JS eval
+            Some(locator),
+            html,
+            tag,
+            text,
+            attrs,
+        ))
+    }
+
+    /// Get multiple elements from shadow DOM JS query.
+    async fn shadow_eles_from_js(&self, query_js: &str) -> Result<Vec<Element>> {
+        let full_js = format!(
+            "(function() {{ \
+               var els = ({query_js}); \
+               if (!els || !els.length) return JSON.stringify([]); \
+               var results = []; \
+               for (var i = 0; i < els.length; i++) {{ \
+                 var el = els[i]; \
+                 var r = {{}}; \
+                 r.html = el.outerHTML; \
+                 r.tag = el.tagName.toLowerCase(); \
+                 r.text = el.innerText || ''; \
+                 var attrs = []; \
+                 for (var j = 0; j < el.attributes.length; j++) {{ \
+                   var a = el.attributes[j]; \
+                   attrs.push([a.name, a.value]); \
+                 }} \
+                 r.attrs = attrs; \
+                 results.push(r); \
+               }} \
+               return JSON.stringify(results); \
+             }})()"
+        );
+
+        let result = self
+            .page
+            .evaluate(full_js.as_str())
+            .await
+            .map_err(|e| Error::Browser(format!("shadow query all: {e}")))?;
+
+        let json_str = result.value().and_then(|v| v.as_str()).unwrap_or("[]");
+
+        let items: Vec<serde_json::Value> = serde_json::from_str(json_str)
+            .map_err(|e| Error::Browser(format!("parse shadow results: {e}")))?;
+
+        let locator = crate::locator::Locator::Css("shadow".into());
+        let mut elements = Vec::with_capacity(items.len());
+        for data in &items {
+            let html = data["html"].as_str().unwrap_or_default().to_string();
+            let tag = data["tag"].as_str().unwrap_or_default().to_string();
+            let text = data["text"].as_str().unwrap_or_default().to_string();
+            let attrs: Vec<(String, String)> = data["attrs"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let a = item.as_array()?;
+                            Some((
+                                a.first()?.as_str()?.to_string(),
+                                a.get(1)?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            elements.push(Element::new_cdp(
+                self.page.clone(),
+                String::new(),
+                Some(locator.clone()),
+                html,
+                tag,
+                text,
+                attrs,
+            ));
+        }
+
+        Ok(elements)
+    }
+
     // ── Internal helpers ─────────────────────────────────────
 
     /// Wait for an element to appear, retrying for `timeout_secs` seconds.
@@ -602,6 +1243,7 @@ impl ChromiumPage {
         timeout_secs: u64,
     ) -> Result<chromiumoxide::Element> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        #[allow(unused_assignments)]
         let mut last_err = String::from("timeout");
 
         while tokio::time::Instant::now() < deadline {
@@ -715,6 +1357,30 @@ impl ChromiumPage {
         Ok(r.value().cloned().unwrap_or(serde_json::Value::Null))
     }
 
+    /// Read text from the clipboard via `navigator.clipboard.readText()`.
+    ///
+    /// The page must be focused and have clipboard-read permission.
+    /// Use `grant_permissions(origin, vec!["clipboard-read".into()])` if needed.
+    pub async fn clipboard_read(&self) -> Result<String> {
+        let val = self.execute("navigator.clipboard.readText()").await?;
+        val.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| Error::Browser("clipboard read failed".into()))
+    }
+
+    /// Write text to the clipboard via `navigator.clipboard.writeText(text)`.
+    ///
+    /// The page must be focused and have clipboard-write permission.
+    /// Use `grant_permissions(origin, vec!["clipboard-write".into()])` if needed.
+    pub async fn clipboard_write(&self, text: &str) -> Result<()> {
+        let js = format!(
+            "navigator.clipboard.writeText({})",
+            serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+        );
+        self.execute(&js).await?;
+        Ok(())
+    }
+
     /// Execute JS on every new document.
     pub async fn evaluate_on_new_document(&self, js: &str) -> Result<()> {
         self.page
@@ -722,6 +1388,56 @@ impl ChromiumPage {
             .await
             .map_err(|e| Error::Browser(format!("init script: {e}")))?;
         Ok(())
+    }
+
+    /// Register a named init script that runs on every new document.
+    ///
+    /// The script is stored locally and registered via
+    /// `Page.addScriptToEvaluateOnNewDocument`.  Use [`remove_init_script`]
+    /// to unregister it later.
+    pub async fn add_init_script(&self, name: &str, js: &str) -> Result<()> {
+        let params = AddScriptToEvaluateOnNewDocumentParams::new(js);
+        let result = self
+            .page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("add_init_script: {e}")))?;
+
+        self.init_scripts
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), js.to_string());
+        self.init_script_ids
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), result.identifier.clone());
+        Ok(())
+    }
+
+    /// Remove a previously registered named init script.
+    ///
+    /// Looks up the CDP identifier and calls
+    /// `Page.removeScriptToEvaluateOnNewDocument`.
+    pub async fn remove_init_script(&self, name: &str) -> Result<()> {
+        let id = self
+            .init_script_ids
+            .lock()
+            .unwrap()
+            .remove(name)
+            .ok_or_else(|| Error::Browser(format!("init script not found: {name}")))?;
+        self.init_scripts.lock().unwrap().remove(name);
+
+        let params = RemoveScriptToEvaluateOnNewDocumentParams::new(id);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("remove_init_script: {e}")))?;
+        Ok(())
+    }
+
+    /// List all registered init script names.
+    pub fn list_init_scripts(&self) -> Vec<String> {
+        self.init_scripts.lock().unwrap().keys().cloned().collect()
     }
 
     // ── Screenshot ───────────────────────────────────────────
@@ -1011,6 +1727,24 @@ impl ChromiumPage {
         crate::network::set_user_agent(&self.page, user_agent).await
     }
 
+    /// Set proxy authentication credentials.
+    ///
+    /// Sends a `Proxy-Authorization: Basic <base64(user:pass)>` header via
+    /// `Network.setExtraHTTPHeaders` so that subsequent requests through
+    /// the proxy include valid credentials.
+    ///
+    /// Make sure the browser was launched with `--proxy-server` (either via
+    /// `ChromiumOptions::proxy` or manually) before calling this method.
+    pub async fn set_proxy_auth(&self, user: &str, pass: &str) -> Result<()> {
+        use base64::Engine;
+        let credentials = format!("{user}:{pass}");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+        let auth_value = format!("Basic {encoded}");
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Proxy-Authorization".to_string(), auth_value);
+        crate::network::set_extra_headers(&self.page, headers).await
+    }
+
     // ── Browser lifecycle ───────────────────────────────────
 
     /// Quit the browser entirely (kills Chrome process).
@@ -1123,10 +1857,16 @@ impl ChromiumPage {
 
     // ── Cookie management ───────────────────────────────────
 
-    /// Delete a cookie by name.
+    /// Delete a cookie by name. Uses the current page URL as the domain hint
+    /// (required by Chrome 149+).
     pub async fn delete_cookie(&self, name: &str) -> Result<()> {
         use chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams;
-        let params = DeleteCookiesParams::new(name);
+        let url = self.url().await.unwrap_or_default();
+        let mut builder = DeleteCookiesParams::builder().name(name);
+        if !url.is_empty() {
+            builder = builder.url(&url);
+        }
+        let params = builder.build().map_err(Error::Browser)?;
         self.page
             .execute(params)
             .await
@@ -1144,20 +1884,79 @@ impl ChromiumPage {
         Ok(())
     }
 
-    // ── PDF export ──────────────────────────────────────────
+    // ── Multi-window management (f26) ──────────────────────────
+
+    /// Return the `user_data_dir` configured for this instance (if any).
+    pub fn user_data_dir(&self) -> Option<&PathBuf> {
+        self.opts.user_data_dir.as_ref()
+    }
+
+    /// Read all cookies from `self` and write them into `other`.
+    ///
+    /// This is a CDP-level copy — cookies are read from the source browser
+    /// and set on the target browser via `Network.setCookie`.
+    pub async fn share_cookies_to(&self, other: &ChromiumPage) -> Result<()> {
+        let all_cookies = self.cookies().await?;
+        for c in all_cookies {
+            other.set_cookie(c).await?;
+        }
+        Ok(())
+    }
+
+    /// Clone this session: launch a **new** browser instance that shares
+    /// the same `user_data_dir`, then copy all cookies into it.
+    ///
+    /// If the original instance has no explicit `user_data_dir`, a new
+    /// temporary directory is created for the clone (cookies are still
+    /// copied via CDP).
+    pub async fn clone_session(&self) -> Result<ChromiumPage> {
+        let mut opts = self.opts.clone();
+        // Assign a different debug port to avoid conflicts
+        opts.debug_port = 9300 + ((std::process::id() as u16).wrapping_add(1) % 700);
+        // If no user_data_dir was set, generate a unique temp one
+        if opts.user_data_dir.is_none() {
+            opts.user_data_dir =
+                Some(std::env::temp_dir().join(format!("rpage-clone-{}", std::process::id())));
+        }
+        let new_page = Self::with_options(opts).await?;
+        self.share_cookies_to(&new_page).await?;
+        Ok(new_page)
+    }
+
+    // ── PDF export (f33) ─────────────────────────────────────
+
+    /// Print current page to PDF and return the raw bytes.
+    ///
+    /// Accepts a [`PdfOptions`] value to control paper size, margins,
+    /// orientation, header/footer templates, scale, page ranges, etc.
+    ///
+    /// Note: generating PDF is only supported in Chrome headless mode.
+    pub async fn pdf_bytes(&self, opts: PdfOptions) -> Result<Vec<u8>> {
+        let params = opts.to_cdp_params();
+        self.page
+            .pdf(params)
+            .await
+            .map_err(|e| Error::Browser(format!("pdf_bytes: {e}")))
+    }
 
     /// Print current page to PDF and save to `path`.
     ///
+    /// Accepts a [`PdfOptions`] value to control paper size, margins,
+    /// orientation, header/footer templates, scale, page ranges, etc.
+    ///
     /// Note: generating PDF is only supported in Chrome headless mode.
-    pub async fn pdf(&self, path: &str) -> Result<()> {
-        use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
-        let bytes = self
-            .page
-            .pdf(PrintToPdfParams::default())
-            .await
-            .map_err(|e| Error::Browser(format!("pdf: {e}")))?;
+    pub async fn pdf_to_file(&self, path: &str, opts: PdfOptions) -> Result<()> {
+        let bytes = self.pdf_bytes(opts).await?;
         std::fs::write(path, bytes)?;
         Ok(())
+    }
+
+    /// Print current page to PDF with default options and save to `path`.
+    ///
+    /// Convenience wrapper around [`Self::pdf_to_file`] with default options.
+    /// Note: generating PDF is only supported in Chrome headless mode.
+    pub async fn pdf(&self, path: &str) -> Result<()> {
+        self.pdf_to_file(path, PdfOptions::default()).await
     }
 
     // ── Viewport ────────────────────────────────────────────
@@ -1170,6 +1969,78 @@ impl ChromiumPage {
             .execute(params)
             .await
             .map_err(|e| Error::Browser(format!("viewport: {e}")))?;
+        Ok(())
+    }
+
+    // ── Device emulation (f22) ─────────────────────────────
+
+    /// Override the browser's geolocation.
+    ///
+    /// Uses `Emulation.setGeolocationOverride` CDP command.
+    pub async fn set_geolocation(&self, lat: f64, lng: f64) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetGeolocationOverrideParams;
+        let params = SetGeolocationOverrideParams::builder()
+            .latitude(lat)
+            .longitude(lng)
+            .build();
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("set_geolocation: {e}")))?;
+        Ok(())
+    }
+
+    /// Override the browser's timezone.
+    ///
+    /// Uses `Emulation.setTimezoneOverride` CDP command.
+    pub async fn set_timezone(&self, tz: &str) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetTimezoneOverrideParams;
+        let params = SetTimezoneOverrideParams::new(tz);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("set_timezone: {e}")))?;
+        Ok(())
+    }
+
+    /// Emulate a device by setting viewport, scale factor, touch mode, and user agent.
+    ///
+    /// Uses `Emulation.setDeviceMetricsOverride`, `Emulation.setTouchEmulationEnabled`,
+    /// and `Network.setUserAgentOverride` CDP commands.
+    pub async fn emulate_device(
+        &self,
+        width: u32,
+        height: u32,
+        ua: &str,
+        scale: f64,
+        touch: bool,
+    ) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::emulation::{
+            SetDeviceMetricsOverrideParams, SetTouchEmulationEnabledParams,
+        };
+        use chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams;
+
+        // Set device metrics
+        let params = SetDeviceMetricsOverrideParams::new(width as i64, height as i64, scale, touch);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("emulate_device metrics: {e}")))?;
+
+        // Enable/disable touch emulation
+        let touch_params = SetTouchEmulationEnabledParams::new(touch);
+        self.page
+            .execute(touch_params)
+            .await
+            .map_err(|e| Error::Browser(format!("emulate_device touch: {e}")))?;
+
+        // Set user agent
+        let ua_params = SetUserAgentOverrideParams::new(ua);
+        self.page
+            .execute(ua_params)
+            .await
+            .map_err(|e| Error::Browser(format!("emulate_device ua: {e}")))?;
+
         Ok(())
     }
 
@@ -1201,6 +2072,55 @@ impl ChromiumPage {
         Ok(())
     }
 
+    // ── Permissions (f27) ────────────────────────────────────
+
+    /// Grant browser permissions for the given origin.
+    ///
+    /// Uses `Browser.setPermission` with `Granted` setting for each
+    /// permission name (e.g. `"geolocation"`, `"notifications"`,
+    /// `"camera"`, `"microphone"`, `"clipboard-read"`).
+    ///
+    /// ```ignore
+    /// page.grant_permissions("https://example.com", vec![
+    ///     "geolocation".into(),
+    ///     "notifications".into(),
+    /// ]).await?;
+    /// ```
+    pub async fn grant_permissions(&self, origin: &str, permissions: Vec<String>) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            PermissionDescriptor, PermissionSetting, SetPermissionParams,
+        };
+        for perm_name in &permissions {
+            let params = SetPermissionParams::builder()
+                .permission(PermissionDescriptor::new(perm_name.clone()))
+                .setting(PermissionSetting::Granted)
+                .origin(origin)
+                .build()
+                .map_err(|e| Error::Browser(format!("grant_permissions build: {e}")))?;
+            self.page
+                .execute(params)
+                .await
+                .map_err(|e| Error::Browser(format!("grant_permissions({perm_name}): {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Reset all browser permission overrides.
+    ///
+    /// Removes all permission grants previously set via `grant_permissions`.
+    ///
+    /// ```ignore
+    /// page.reset_permissions().await?;
+    /// ```
+    pub async fn reset_permissions(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::ResetPermissionsParams;
+        self.page
+            .execute(ResetPermissionsParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("reset_permissions: {e}")))?;
+        Ok(())
+    }
+
     // ── Accessors ────────────────────────────────────────────
 
     pub fn inner_page(&self) -> &Page {
@@ -1217,6 +2137,41 @@ impl ChromiumPage {
     }
     pub fn network_monitor(&self) -> &Arc<crate::network::NetworkMonitor> {
         &self.network_monitor
+    }
+
+    /// Get the console monitor.
+    pub fn console_monitor(&self) -> &Arc<ConsoleMonitor> {
+        &self.console_monitor
+    }
+
+    /// Get all captured console log entries.
+    pub fn console_log(&self) -> Vec<crate::console::ConsoleEntry> {
+        self.console_monitor.logs()
+    }
+
+    /// Get all captured JS exceptions.
+    pub fn console_exceptions(&self) -> Vec<crate::console::JsException> {
+        self.console_monitor.exceptions()
+    }
+
+    /// Clear all captured console entries and exceptions.
+    pub fn clear_console(&self) {
+        self.console_monitor.clear();
+    }
+
+    /// Get all captured WebSocket frames.
+    pub fn ws_frames(&self) -> Vec<crate::websocket::WsFrame> {
+        self.ws_monitor.frames()
+    }
+
+    /// Get all captured WebSocket events (Created/Closed/Error).
+    pub fn ws_events(&self) -> Vec<crate::websocket::WsEvent> {
+        self.ws_monitor.events()
+    }
+
+    /// Clear all captured WebSocket frames and events.
+    pub fn clear_ws_frames(&self) {
+        self.ws_monitor.clear();
     }
 
     /// Get all tracked downloads.
@@ -1378,6 +2333,460 @@ impl ChromiumPage {
             _active: true,
             paused,
         })
+    }
+
+    // ── Performance metrics ───────────────────────────────────
+
+    /// Retrieve current CDP performance metrics.
+    ///
+    /// Enables the Performance domain and calls `Performance.getMetrics`.
+    /// Returns a list of `(name, value)` pairs such as `Timestamp`,
+    /// `Documents`, `Frames`, `JSEventListeners`, etc.
+    pub async fn performance_metrics(&self) -> Result<Vec<(String, f64)>> {
+        use chromiumoxide::cdp::browser_protocol::performance::{EnableParams, GetMetricsParams};
+        // Enable the Performance domain first
+        self.page
+            .execute(EnableParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("Performance.enable: {e}")))?;
+        // Retrieve metrics
+        let resp = self
+            .page
+            .execute(GetMetricsParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("Performance.getMetrics: {e}")))?;
+        Ok(resp
+            .metrics
+            .clone()
+            .into_iter()
+            .map(|m| (m.name, m.value))
+            .collect())
+    }
+
+    /// Extract page-load timing via `performance.timing` (JS).
+    ///
+    /// Returns a `HashMap` with computed durations (ms):
+    /// - `dns`          — DNS lookup
+    /// - `tcp`          — TCP handshake
+    /// - `request`      — request sent → response start
+    /// - `response`     — response start → response end
+    /// - `dom`          — DOM parsing
+    /// - `load`         — total page load
+    /// - `domInteractive` — DOM interactive
+    /// - `domContentLoaded` — DOMContentLoaded event
+    pub async fn page_timing(&self) -> Result<std::collections::HashMap<String, f64>> {
+        let js = r#"
+(function() {
+  var t = performance.timing;
+  return JSON.stringify({
+    dns: t.domainLookupEnd - t.domainLookupStart,
+    tcp: t.connectEnd - t.connectStart,
+    request: t.responseStart - t.requestStart,
+    response: t.responseEnd - t.responseStart,
+    dom: t.domComplete - t.domLoading,
+    load: t.loadEventEnd - t.navigationStart,
+    domInteractive: t.domInteractive - t.navigationStart,
+    domContentLoaded: t.domContentLoadedEventEnd - t.navigationStart
+  });
+})()
+"#;
+        let val = self.execute(js).await?;
+        let json_str = val
+            .as_str()
+            .ok_or_else(|| Error::Browser("page_timing: JS did not return a string".into()))?;
+        let parsed: std::collections::HashMap<String, f64> = serde_json::from_str(json_str)
+            .map_err(|e| Error::Browser(format!("page_timing parse: {e}")))?;
+        Ok(parsed)
+    }
+
+    // ── File chooser (f25) ────────────────────────────────────
+
+    /// Enable or disable interception of file chooser dialogs.
+    ///
+    /// When enabled, the native file chooser dialog is suppressed and a
+    /// `Page.fileChooserOpened` CDP event is emitted instead.
+    pub async fn set_file_chooser(&self, enabled: bool) {
+        use chromiumoxide::cdp::browser_protocol::page::SetInterceptFileChooserDialogParams;
+        let params = SetInterceptFileChooserDialogParams::new(enabled);
+        let _ = self.page.execute(params).await;
+    }
+
+    /// Wait for a file chooser dialog event within the given timeout.
+    ///
+    /// Returns `FileChooserInfo` containing the `backend_node_id` of the
+    /// `<input type="file">` element and the mode (`"selectSingle"` or
+    /// `"selectMultiple"`).
+    pub async fn wait_file_chooser(&self, timeout_secs: u64) -> Result<FileChooserInfo> {
+        use chromiumoxide::cdp::browser_protocol::page::EventFileChooserOpened;
+
+        let result: Arc<Mutex<Option<FileChooserInfo>>> = Arc::new(Mutex::new(None));
+        let result_clone = result.clone();
+
+        if let Ok(mut rx) = self.page.event_listener::<EventFileChooserOpened>().await {
+            tokio::spawn(async move {
+                if let Some(ev) = rx.next().await {
+                    let info = FileChooserInfo {
+                        backend_node_id: ev.backend_node_id.map_or(0, |id| *id.inner() as u64),
+                        mode: ev.mode.as_ref().to_string(),
+                    };
+                    if let Ok(mut guard) = result_clone.lock() {
+                        *guard = Some(info);
+                    }
+                }
+            });
+        }
+
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            {
+                let guard = result
+                    .lock()
+                    .map_err(|e| Error::Browser(format!("lock: {e}")))?;
+                if guard.is_some() {
+                    return Ok(guard.clone().unwrap());
+                }
+            }
+            if start.elapsed() > duration {
+                return Err(Error::Timeout("wait_file_chooser timed out".into()));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    // ── Audio control (f34) ────────────────────────────────────
+
+    /// Mute all audio on the page by monkey-patching `HTMLMediaElement.prototype.play`
+    /// and `window.AudioContext` via JavaScript injection.
+    pub async fn mute(&self) -> Result<()> {
+        self.execute(
+            r#"(function(){if(!window.__audioMuted){window.__audioMuted=true;window.__origCreateMediaElement=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){return Promise.resolve()};window.__origAudioCtx=window.AudioContext;window.AudioContext=function(){return{close:()=>{},createGain:()=>({connect:()=>{},gain:{setValueAtTime:()=>{}}}),destination:{}}}}})()"#,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Unmute audio by restoring the original `HTMLMediaElement.prototype.play`
+    /// and `window.AudioContext`.
+    pub async fn unmute(&self) -> Result<()> {
+        self.execute(
+            r#"if(window.__audioMuted){HTMLMediaElement.prototype.play=window.__origCreateMediaElement;window.AudioContext=window.__origAudioCtx;window.__audioMuted=false}"#,
+        )
+        .await?;
+        Ok(())
+    }
+
+    // ── DOM Snapshot (f31) ────────────────────────────────────
+
+    /// Capture a full DOM snapshot of the current page as a JSON tree.
+    ///
+    /// This is implemented via JavaScript evaluation rather than the
+    /// `DOMSnapshot.captureSnapshot` CDP command for maximum compatibility.
+    pub async fn dom_snapshot(&self) -> Result<serde_json::Value> {
+        self.execute(
+            r#"(() => {
+                function serialize(node) {
+                    let obj = { type: node.nodeType, name: node.nodeName };
+                    if (node.attributes) {
+                        obj.attrs = {};
+                        for (let i = 0; i < node.attributes.length; i++) {
+                            obj.attrs[node.attributes[i].name] = node.attributes[i].value;
+                        }
+                    }
+                    if (node.childNodes && node.childNodes.length > 0) {
+                        obj.children = Array.from(node.childNodes).map(serialize);
+                    }
+                    if (node.nodeValue) obj.value = node.nodeValue.trim();
+                    return obj;
+                }
+                return JSON.stringify(serialize(document.documentElement));
+            })()"#,
+        )
+        .await
+    }
+
+    // ── CSS override (f35) ──────────────────────────────────────
+
+    /// Inject a `<style>` tag into the page and return its generated ID.
+    ///
+    /// The returned ID can later be passed to `remove_css` to delete the tag.
+    pub async fn inject_css(&self, css: &str) -> Result<String> {
+        let id = format!(
+            "rpage-css-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let js = format!(
+            r#"(function() {{
+                var style = document.createElement('style');
+                style.type = 'text/css';
+                style.id = {id_json};
+                style.textContent = {css_json};
+                document.head.appendChild(style);
+            }})()"#,
+            id_json = serde_json::to_string(&id).unwrap(),
+            css_json = serde_json::to_string(css).unwrap(),
+        );
+        self.execute(&js).await?;
+        Ok(id)
+    }
+
+    /// Remove a previously injected `<style>` tag by its ID.
+    pub async fn remove_css(&self, id: &str) -> Result<()> {
+        let js = format!(
+            r#"(function() {{
+                var el = document.getElementById({id_json});
+                if (el) el.remove();
+            }})()"#,
+            id_json = serde_json::to_string(id).unwrap(),
+        );
+        self.execute(&js).await?;
+        Ok(())
+    }
+
+    // ── Load strategy ────────────────────────────────────────
+
+    /// Set the page load strategy.
+    ///
+    /// Controls how `get()` waits after navigation:
+    /// - `"normal"` — wait for the full `load` event (default)
+    /// - `"eager"` — wait for `DOMContentLoaded` only
+    /// - `"none"` — return immediately after navigation
+    pub fn set_load_strategy(&mut self, strategy: &str) {
+        self.load_strategy = strategy.to_string();
+    }
+
+    /// Get the current load strategy.
+    pub fn load_strategy(&self) -> &str {
+        &self.load_strategy
+    }
+
+    // ── Window management ─────────────────────────────────────
+
+    /// Get the current browser window's bounds (position + size).
+    ///
+    /// Returns `(left, top, width, height)`.
+    pub async fn get_window_bounds(&self) -> Result<(i32, i32, u32, u32)> {
+        // Use JS to get window dimensions
+        let js = r#"(function() {
+            return JSON.stringify({
+                left: window.screenX || 0,
+                top: window.screenY || 0,
+                width: window.outerWidth || 0,
+                height: window.outerHeight || 0
+            });
+        })()"#;
+        let val = self.execute(js).await?;
+        let s = val.as_str().ok_or_else(|| {
+            Error::Browser("get_window_bounds: JS did not return a string".into())
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| Error::Browser(format!("get_window_bounds parse: {e}")))?;
+        Ok((
+            parsed["left"].as_i64().unwrap_or(0) as i32,
+            parsed["top"].as_i64().unwrap_or(0) as i32,
+            parsed["width"].as_u64().unwrap_or(0) as u32,
+            parsed["height"].as_u64().unwrap_or(0) as u32,
+        ))
+    }
+
+    /// Set window position (top-left corner).
+    pub async fn set_window_position(&self, left: i32, top: i32) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, SetWindowBoundsParams,
+        };
+        let resp = self
+            .page
+            .execute(GetWindowForTargetParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("get_window_for_target: {e}")))?;
+        let window_id = resp.window_id;
+
+        // Get current size to preserve it
+        let (_, _, width, height) = self.get_window_bounds().await?;
+
+        let bounds = Bounds::builder()
+            .left(left as i64)
+            .top(top as i64)
+            .width(width as i64)
+            .height(height as i64)
+            .build();
+        let params = SetWindowBoundsParams::new(window_id, bounds);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("set_window_position: {e}")))?;
+        Ok(())
+    }
+
+    /// Set window size (width × height).
+    pub async fn set_window_size(&self, width: u32, height: u32) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, SetWindowBoundsParams,
+        };
+        let resp = self
+            .page
+            .execute(GetWindowForTargetParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("get_window_for_target: {e}")))?;
+        let window_id = resp.window_id;
+
+        // Get current position to preserve it
+        let (left, top, _, _) = self.get_window_bounds().await?;
+
+        let bounds = Bounds::builder()
+            .left(left as i64)
+            .top(top as i64)
+            .width(width as i64)
+            .height(height as i64)
+            .build();
+        let params = SetWindowBoundsParams::new(window_id, bounds);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("set_window_size: {e}")))?;
+        Ok(())
+    }
+
+    /// Minimize the browser window.
+    pub async fn minimize(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, SetWindowBoundsParams, WindowState,
+        };
+        let resp = self
+            .page
+            .execute(GetWindowForTargetParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("get_window_for_target: {e}")))?;
+        let bounds = Bounds {
+            window_state: Some(WindowState::Minimized),
+            ..Default::default()
+        };
+        let params = SetWindowBoundsParams::new(resp.window_id, bounds);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("minimize: {e}")))?;
+        Ok(())
+    }
+
+    /// Maximize the browser window.
+    pub async fn maximize(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, SetWindowBoundsParams, WindowState,
+        };
+        let resp = self
+            .page
+            .execute(GetWindowForTargetParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("get_window_for_target: {e}")))?;
+        let bounds = Bounds {
+            window_state: Some(WindowState::Maximized),
+            ..Default::default()
+        };
+        let params = SetWindowBoundsParams::new(resp.window_id, bounds);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("maximize: {e}")))?;
+        Ok(())
+    }
+
+    /// Set the browser window to fullscreen.
+    pub async fn fullscreen(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, SetWindowBoundsParams, WindowState,
+        };
+        let resp = self
+            .page
+            .execute(GetWindowForTargetParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("get_window_for_target: {e}")))?;
+        let bounds = Bounds {
+            window_state: Some(WindowState::Fullscreen),
+            ..Default::default()
+        };
+        let params = SetWindowBoundsParams::new(resp.window_id, bounds);
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("fullscreen: {e}")))?;
+        Ok(())
+    }
+
+    // ── Alert convenience wrappers ──────────────────────────
+
+    /// Accept the current JavaScript dialog (alert / confirm / prompt).
+    ///
+    /// Shorthand for `handle_alert(true, None)`.
+    pub async fn accept_alert(&self) -> Result<()> {
+        self.handle_alert(true, None).await
+    }
+
+    /// Dismiss the current JavaScript dialog (alert / confirm / prompt).
+    ///
+    /// Shorthand for `handle_alert(false, None)`.
+    pub async fn dismiss_alert(&self) -> Result<()> {
+        self.handle_alert(false, None).await
+    }
+
+    /// Accept a prompt dialog and supply the text to enter.
+    ///
+    /// Shorthand for `handle_alert(true, Some(text))`.
+    pub async fn accept_prompt(&self, text: &str) -> Result<()> {
+        self.handle_alert(true, Some(text)).await
+    }
+
+    // ── Download helpers ────────────────────────────────────
+
+    /// Return the default download directory used by the download manager.
+    pub fn download_dir(&self) -> PathBuf {
+        self.download_manager.default_dir().to_path_buf()
+    }
+
+    /// Navigate to `url` and wait for a download to complete.
+    ///
+    /// Uses `get()` to trigger the download, then polls `wait_download()`.
+    /// Returns the `DownloadInfo` of the completed download.
+    pub async fn download(&self, url: &str, timeout_secs: u64) -> Result<crate::download::DownloadInfo> {
+        self.get(url).await?;
+        self.wait_download(timeout_secs).await
+    }
+
+    /// Clear all tracked download records.
+    pub fn clear_downloads(&self) {
+        self.download_manager.clear();
+    }
+
+    /// Wait for a specific download whose filename contains `pattern`.
+    ///
+    /// Polls the download list until a completed download with a matching
+    /// filename is found, or `timeout_secs` elapses.
+    pub async fn wait_for_download_file(
+        &self,
+        pattern: &str,
+        timeout_secs: u64,
+    ) -> Result<crate::download::DownloadInfo> {
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let list = self.download_manager.list();
+            for dl in &list {
+                if dl.filename.contains(pattern)
+                    && dl.status == crate::download::DownloadStatus::Completed
+                {
+                    return Ok(dl.clone());
+                }
+            }
+            if start.elapsed() > duration {
+                return Err(Error::Timeout(format!(
+                    "wait_for_download_file({pattern}) timed out"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
     }
 }
 
@@ -1780,5 +3189,83 @@ impl<'a> ActionChain<'a> {
             }
         }
         Ok(())
+    }
+}
+
+// ── Shadow DOM helper functions ──────────────────────────────
+
+/// Build a JS expression that recursively pierces shadow DOM and returns
+/// the first matching element via `querySelector`.
+///
+/// `host_sel` and each entry in `inner_sels` must already be JSON-quoted strings.
+fn build_shadow_query_js(host_sel: &str, inner_sels: &[String]) -> String {
+    if inner_sels.len() == 1 {
+        format!(
+            "(function() {{ \
+               var host = document.querySelector({host_sel}); \
+               if (!host || !host.shadowRoot) return null; \
+               return host.shadowRoot.querySelector({inner}); \
+             }})()",
+            host_sel = host_sel,
+            inner = &inner_sels[0]
+        )
+    } else {
+        // Multi-level: recursive descent through shadow roots
+        let mut body = format!(
+            "var cur = document.querySelector({host_sel}); \
+             if (!cur || !cur.shadowRoot) return null; \
+             cur = cur.shadowRoot;",
+            host_sel = host_sel
+        );
+        for (i, sel) in inner_sels.iter().enumerate() {
+            if i < inner_sels.len() - 1 {
+                body.push_str(&format!(
+                    " cur = cur.querySelector({sel}); \
+                     if (!cur || !cur.shadowRoot) return null; \
+                     cur = cur.shadowRoot;",
+                    sel = sel
+                ));
+            } else {
+                body.push_str(&format!(" return cur.querySelector({sel});", sel = sel));
+            }
+        }
+        format!("(function() {{ {body} }})()")
+    }
+}
+
+/// Build a JS expression that recursively pierces shadow DOM and returns
+/// all matching elements via `querySelectorAll` (on the final level).
+fn build_shadow_query_all_js(host_sel: &str, inner_sels: &[String]) -> String {
+    if inner_sels.len() == 1 {
+        format!(
+            "(function() {{ \
+               var host = document.querySelector({host_sel}); \
+               if (!host || !host.shadowRoot) return []; \
+               return host.shadowRoot.querySelectorAll({inner}); \
+             }})()",
+            host_sel = host_sel,
+            inner = &inner_sels[0]
+        )
+    } else {
+        // Multi-level: navigate to the penultimate level, then querySelectorAll
+        let mut body = format!(
+            "var cur = document.querySelector({host_sel}); \
+             if (!cur || !cur.shadowRoot) return []; \
+             cur = cur.shadowRoot;",
+            host_sel = host_sel
+        );
+        for (i, sel) in inner_sels.iter().enumerate() {
+            if i < inner_sels.len() - 1 {
+                body.push_str(&format!(
+                    " cur = cur.querySelector({sel}); \
+                     if (!cur || !cur.shadowRoot) return []; \
+                     cur = cur.shadowRoot;",
+                    sel = sel
+                ));
+            } else {
+                body.push_str(&format!(" return cur.querySelectorAll({sel});", sel = sel));
+            }
+        }
+        format!("(function() {{ {body} }})()")
     }
 }

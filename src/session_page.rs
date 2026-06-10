@@ -20,6 +20,8 @@ pub struct SessionPage {
     current_html: String,
     document: Option<Html>,
     current_url: Option<String>,
+    last_status: Option<reqwest::StatusCode>,
+    last_headers: Option<reqwest::header::HeaderMap>,
     #[allow(dead_code)]
     opts: SessionOptions,
 }
@@ -40,6 +42,8 @@ impl SessionPage {
             current_html: String::new(),
             document: None,
             current_url: None,
+            last_status: None,
+            last_headers: None,
             opts,
         })
     }
@@ -56,6 +60,8 @@ impl SessionPage {
             current_html: String::new(),
             document: None,
             current_url: None,
+            last_status: None,
+            last_headers: None,
             opts,
         })
     }
@@ -109,14 +115,93 @@ impl SessionPage {
         &self.client
     }
 
+    /// HTTP status of the last response.
+    pub fn last_status(&self) -> Option<reqwest::StatusCode> {
+        self.last_status
+    }
+
+    /// Whether the last response was a success (2xx).
+    pub fn last_ok(&self) -> bool {
+        self.last_status.is_some_and(|s| s.is_success())
+    }
+
+    /// Response headers from the last request.
+    pub fn last_headers(&self) -> Option<&reqwest::header::HeaderMap> {
+        self.last_headers.as_ref()
+    }
+
+    // ── Cookie management ─────────────────────────────────────
+
+    /// Get all cookies for the current URL.
+    pub fn cookies(&self) -> Result<Vec<cookie_store::Cookie<'static>>> {
+        let url = self
+            .current_url
+            .as_deref()
+            .ok_or_else(|| Error::CookieSync("no page loaded".into()))?;
+        self.cookie_hub.get_cookies(url)
+    }
+
+    /// Get all cookies for a specific URL.
+    pub fn cookies_for(&self, url: &str) -> Result<Vec<cookie_store::Cookie<'static>>> {
+        self.cookie_hub.get_cookies(url)
+    }
+
+    /// Get the cookie header string for the current URL (e.g. `"name=val; name2=val2"`).
+    pub fn cookie_header(&self) -> Result<String> {
+        let url = self
+            .current_url
+            .as_deref()
+            .ok_or_else(|| Error::CookieSync("no page loaded".into()))?;
+        self.cookie_hub.cookie_header(url)
+    }
+
+    /// Set a cookie from a raw `name=value; Domain=...; Path=...` string for the given URL.
+    pub fn set_cookie_raw(&self, cookie_str: &str, url: &str) -> Result<()> {
+        self.cookie_hub.set_cookie_raw(cookie_str, url)
+    }
+
+    /// Set a cookie for the current page URL using a simple name/value pair.
+    pub fn set_cookie(&self, name: &str, value: &str) -> Result<()> {
+        let url_str = self
+            .current_url
+            .as_deref()
+            .ok_or_else(|| Error::CookieSync("no page loaded".into()))?;
+        let url = url::Url::parse(url_str)?;
+        let cookie_str = format!(
+            "{}={}; Path=/",
+            name,
+            value,
+        );
+        let cookie =
+            cookie_store::Cookie::parse(cookie_str, &url)
+                .map_err(|e| Error::CookieSync(format!("parse cookie: {e}")))?;
+        self.cookie_hub.set_cookie(cookie, &url)
+    }
+
+    /// Clear all cookies.
+    pub fn clear_cookies(&self) -> Result<()> {
+        self.cookie_hub.clear()
+    }
+
+    /// Save all cookies to a JSON file.
+    pub fn save_cookies(&self, path: &str) -> Result<()> {
+        self.cookie_hub.save_to_file(path)
+    }
+
+    /// Load cookies from a JSON file.
+    pub fn load_cookies(&self, path: &str) -> Result<()> {
+        self.cookie_hub.load_from_file(path)
+    }
+
     // ── HTTP methods ─────────────────────────────────────────
 
     /// GET request, cache the response.
     pub async fn get(&mut self, url: &str) -> Result<String> {
         debug!("GET {url}");
         let resp = self.client.get(url).send().await?;
-        let status = resp.status();
-        debug!("Response status: {status}");
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
+        debug!("Response status: {}", resp.status());
 
         let text = resp.text().await?;
         self.current_html = text;
@@ -129,6 +214,8 @@ impl SessionPage {
     pub async fn post(&mut self, url: &str, body: impl Into<reqwest::Body>) -> Result<String> {
         debug!("POST {url}");
         let resp = self.client.post(url).body(body).send().await?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
         let text = resp.text().await?;
         self.current_html = text.clone();
         self.document = Some(Html::parse_document(&self.current_html));
@@ -151,6 +238,89 @@ impl SessionPage {
     pub async fn get_raw(&self, url: &str) -> Result<reqwest::Response> {
         let resp = self.client.get(url).send().await?;
         Ok(resp)
+    }
+
+    /// PUT request with plain text body.
+    pub async fn put(&mut self, url: &str, body: impl Into<reqwest::Body>) -> Result<String> {
+        debug!("PUT {url}");
+        let resp = self.client.put(url).body(body).send().await?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
+        let text = resp.text().await?;
+        self.current_html = text.clone();
+        self.document = Some(Html::parse_document(&self.current_html));
+        self.current_url = Some(url.to_string());
+        Ok(text)
+    }
+
+    /// PUT JSON.
+    pub async fn put_json(
+        &mut self,
+        url: &str,
+        json: &serde_json::Value,
+    ) -> Result<String> {
+        debug!("PUT (json) {url}");
+        let resp = self.client.put(url).json(json).send().await?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
+        let text = resp.text().await?;
+        self.current_html = text.clone();
+        self.document = Some(Html::parse_document(&self.current_html));
+        self.current_url = Some(url.to_string());
+        Ok(text)
+    }
+
+    /// DELETE request.
+    pub async fn delete(&mut self, url: &str) -> Result<String> {
+        debug!("DELETE {url}");
+        let resp = self.client.delete(url).send().await?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
+        let text = resp.text().await?;
+        self.current_html = text.clone();
+        self.document = Some(Html::parse_document(&self.current_html));
+        self.current_url = Some(url.to_string());
+        Ok(text)
+    }
+
+    /// PATCH request with plain text body.
+    pub async fn patch(&mut self, url: &str, body: impl Into<reqwest::Body>) -> Result<String> {
+        debug!("PATCH {url}");
+        let resp = self.client.patch(url).body(body).send().await?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
+        let text = resp.text().await?;
+        self.current_html = text.clone();
+        self.document = Some(Html::parse_document(&self.current_html));
+        self.current_url = Some(url.to_string());
+        Ok(text)
+    }
+
+    /// PATCH JSON.
+    pub async fn patch_json(
+        &mut self,
+        url: &str,
+        json: &serde_json::Value,
+    ) -> Result<String> {
+        debug!("PATCH (json) {url}");
+        let resp = self.client.patch(url).json(json).send().await?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
+        let text = resp.text().await?;
+        self.current_html = text.clone();
+        self.document = Some(Html::parse_document(&self.current_html));
+        self.current_url = Some(url.to_string());
+        Ok(text)
+    }
+
+    /// HEAD request (returns status code, does not cache body).
+    pub async fn head(&mut self, url: &str) -> Result<reqwest::StatusCode> {
+        debug!("HEAD {url}");
+        let resp = self.client.head(url).send().await?;
+        let status = resp.status();
+        self.last_status = Some(status);
+        self.last_headers = Some(resp.headers().clone());
+        Ok(status)
     }
 
     /// Send a multipart/form-data POST request with file upload.
@@ -183,6 +353,8 @@ impl SessionPage {
             .send()
             .await
             .map_err(|e| Error::Browser(format!("multipart POST: {e}")))?;
+        self.last_status = Some(resp.status());
+        self.last_headers = Some(resp.headers().clone());
         let text = resp
             .text()
             .await

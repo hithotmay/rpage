@@ -6,6 +6,7 @@
 //! - `WebPage`: Combines both, with seamless mode switching and cookie sync
 
 pub mod config;
+pub mod console;
 pub mod cookie_hub;
 pub mod download;
 pub mod element;
@@ -15,6 +16,7 @@ pub mod network;
 pub mod session_page;
 pub mod stealth;
 pub mod wait;
+pub mod websocket;
 
 pub mod chromium_page;
 pub mod web_page;
@@ -24,9 +26,11 @@ pub mod prelude;
 // Re-export key types at crate root
 pub use chromium_page::ChromiumPage;
 pub use chromium_page::{
-    ActionChain, CookieInfo, FrameContext, InterceptGuard, InterceptedRequest,
+    ActionChain, CookieInfo, FileChooserInfo, FrameContext, InterceptGuard, InterceptedRequest,
+    PdfOptions,
 };
 pub use config::{ChromiumOptions, SessionOptions, WebPageOptions};
+pub use console::ConsoleMonitor;
 pub use cookie_hub::CookieHub;
 pub use download::DownloadManager;
 pub use element::Element;
@@ -38,3 +42,4 @@ pub use session_page::SessionPage;
 pub use stealth::StealthConfig;
 pub use wait::WaitOptions;
 pub use web_page::{PageMode, WebPage};
+pub use websocket::{WebSocketMonitor, WsEvent, WsFrame};

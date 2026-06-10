@@ -35,6 +35,8 @@ pub struct ChromiumOptions {
     pub headless: bool,
     /// Proxy URL, e.g. "http://127.0.0.1:7890"
     pub proxy: Option<String>,
+    /// Proxy authentication credentials: (username, password)
+    pub proxy_auth: Option<(String, String)>,
     /// Path to Chrome/Chromium binary
     pub browser_path: Option<PathBuf>,
     /// User data directory for persistent profiles
@@ -59,6 +61,7 @@ impl Default for ChromiumOptions {
             viewport: Viewport::default(),
             headless: true,
             proxy: None,
+            proxy_auth: None,
             browser_path: None,
             user_data_dir: None,
             extension_dirs: Vec::new(),
@@ -108,6 +111,11 @@ impl ChromiumOptionsBuilder {
 
     pub fn proxy(mut self, p: impl Into<String>) -> Self {
         self.opts.proxy = Some(p.into());
+        self
+    }
+
+    pub fn proxy_auth(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
+        self.opts.proxy_auth = Some((user.into(), pass.into()));
         self
     }
 

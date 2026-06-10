@@ -1,6 +1,7 @@
 //! Prelude module - re-exports all key types for convenient importing
 
 pub use crate::config::{ChromiumOptions, SessionOptions, WebPageOptions};
+pub use crate::console::ConsoleMonitor;
 pub use crate::cookie_hub::CookieHub;
 pub use crate::download::DownloadManager;
 pub use crate::element::Element;
