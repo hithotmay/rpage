@@ -2,10 +2,10 @@
 //!
 //! WebPage::new() 自动：检测 Chrome → 启动子进程 → 等待就绪 → CDP 连接
 //! get() 自动等待页面加载完成
-//! ele() 自动重试等待元素出现（最多 5 秒）
+//! ele()/eles() 自动重试等待元素出现（最多 5 秒）
 //! fill() 自动清空+输入，支持中文
 
-use rpage::WebPage;
+use rpage::prelude::*;
 
 #[tokio::main]
 async fn main() -> rpage::Result<()> {
@@ -22,15 +22,10 @@ async fn main() -> rpage::Result<()> {
     // 点击搜索
     page.ele("#su").await?.click().await?;
 
-    // 等一下让搜索结果加载
-    page.sleep(std::time::Duration::from_secs(2)).await;
-
-    // 获取结果
-    println!("📄 标题: {}", page.title().await?);
+    // eles() 自动重试等搜索结果出现
     let results = page.eles("h3").await?;
     println!("\n📋 百度搜索结果 ({} 条):", results.len());
-    for (i, r) in results.iter().enumerate() {
-        let text = r.text();
+    for (i, text) in results.texts().iter().enumerate() {
         if !text.is_empty() {
             println!("  {}. {}", i + 1, text);
         }
