@@ -613,6 +613,24 @@ impl WebPage {
             .await
     }
 
+    /// Wait for an element matching the locator to become hidden or be removed.
+    pub async fn wait_ele_hidden(&self, locator_str: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_ele_hidden requires Chromium mode".into()))?
+            .wait_ele_hidden(locator_str, timeout_secs)
+            .await
+    }
+
+    /// Wait for an element matching the locator to be removed from the DOM entirely.
+    pub async fn wait_ele_deleted(&self, locator_str: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_ele_deleted requires Chromium mode".into()))?
+            .wait_ele_deleted(locator_str, timeout_secs)
+            .await
+    }
+
     // ── Runtime configuration (Chromium only) ─────────────
 
     /// Set extra HTTP headers for all subsequent requests.
@@ -634,6 +652,35 @@ impl WebPage {
             .ok_or_else(|| Error::Browser("set_user_agent requires Chromium mode".into()))?
             .set_user_agent(user_agent)
             .await
+    }
+
+    // ── Multipart POST (Session only) ───────────────────────
+
+    /// Send a multipart/form-data POST request with file upload (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn post_multipart(
+        &self,
+        url: &str,
+        fields: std::collections::HashMap<String, String>,
+        file_field: &str,
+        file_path: &str,
+    ) -> Result<String> {
+        self.session
+            .borrow_mut()
+            .post_multipart(url, fields, file_field, file_path)
+            .await
+    }
+
+    // ── Cookie save/load ────────────────────────────────────
+
+    /// Save all cookies to a JSON file.
+    pub fn save_cookies_to_file(&self, path: &str) -> Result<()> {
+        self.cookie_hub.save_to_file(path)
+    }
+
+    /// Load cookies from a JSON file.
+    pub fn load_cookies_from_file(&self, path: &str) -> Result<()> {
+        self.cookie_hub.load_from_file(path)
     }
 
     // ── Accessors ────────────────────────────────────────────

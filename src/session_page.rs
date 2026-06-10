@@ -153,6 +153,46 @@ impl SessionPage {
         Ok(resp)
     }
 
+    /// Send a multipart/form-data POST request with file upload.
+    pub async fn post_multipart(
+        &mut self,
+        url: &str,
+        fields: std::collections::HashMap<String, String>,
+        file_field: &str,
+        file_path: &str,
+    ) -> Result<String> {
+        let mut form = reqwest::multipart::Form::new();
+        for (k, v) in fields {
+            form = form.text(k, v);
+        }
+        let file_content =
+            std::fs::read(file_path).map_err(|e| Error::Browser(format!("read file: {e}")))?;
+        let file_name = std::path::Path::new(file_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let part = reqwest::multipart::Part::bytes(file_content).file_name(file_name);
+        form = form.part(file_field.to_string(), part);
+
+        let resp = self
+            .client
+            .post(url)
+            .multipart(form)
+            .timeout(self.opts.timeout)
+            .send()
+            .await
+            .map_err(|e| Error::Browser(format!("multipart POST: {e}")))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| Error::Browser(format!("read response: {e}")))?;
+        self.current_html = text.clone();
+        self.document = Some(scraper::Html::parse_document(&self.current_html));
+        self.current_url = Some(url.to_string());
+        Ok(text)
+    }
+
     // ── Element queries ──────────────────────────────────────
 
     /// Find first matching element.

@@ -17,6 +17,7 @@ use crate::config::ChromiumOptions;
 use crate::download::DownloadManager;
 use crate::element::Element;
 use crate::error::{Error, Result};
+use crate::locator::locator_to_selector;
 
 /// Cookie info extracted from the browser.
 #[derive(Debug, Clone)]
@@ -31,6 +32,33 @@ pub struct CookieInfo {
 
 /// Try to find Chrome on the system.
 fn find_chrome() -> Option<PathBuf> {
+    // 1. Check RPAGE_CHROME_PATH environment variable
+    if let Ok(path) = std::env::var("RPAGE_CHROME_PATH") {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. Check PATH for common binary names
+    if let Ok(path_var) = std::env::var("PATH") {
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        for dir in path_var.split(separator) {
+            let candidates: &[&str] = if cfg!(windows) {
+                &["chrome.exe", "chromium.exe"]
+            } else {
+                &["chrome", "chromium", "google-chrome", "chromium-browser"]
+            };
+            for name in candidates {
+                let full = PathBuf::from(dir).join(name);
+                if full.exists() {
+                    return Some(full);
+                }
+            }
+        }
+    }
+
+    // 3. Check standard install paths
     let candidates = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -391,7 +419,8 @@ impl ChromiumPage {
             }
             // Find the first element using first locator
             let first_sel = locator_to_selector(&steps[0])?;
-            let mut cdp_el = self.wait_for_element(&first_sel, 5).await?;
+            let timeout_secs = self.opts.timeout.as_secs();
+            let mut cdp_el = self.wait_for_element(&first_sel, timeout_secs).await?;
 
             // For each subsequent step, search within the current element
             for step in steps.iter().skip(1) {
@@ -407,8 +436,9 @@ impl ChromiumPage {
 
         let selector = locator_to_selector(&locator)?;
 
-        // Auto-retry: wait up to 5 seconds for element to appear
-        let cdp_el = self.wait_for_element(&selector, 5).await?;
+        // Auto-retry: wait up to configured timeout for element to appear
+        let timeout_secs = self.opts.timeout.as_secs();
+        let cdp_el = self.wait_for_element(&selector, timeout_secs).await?;
 
         self.build_element_from_cdp(cdp_el, locator).await
     }
@@ -461,8 +491,8 @@ impl ChromiumPage {
 
         let selector = locator_to_selector(&locator)?;
 
-        // Auto-retry: wait up to 5 seconds for at least one element
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Auto-retry: wait up to configured timeout for at least one element
+        let deadline = tokio::time::Instant::now() + self.opts.timeout;
         let mut cdp_els = self
             .page
             .find_elements(&selector)
@@ -798,6 +828,76 @@ impl ChromiumPage {
         }
     }
 
+    /// Wait for an element matching the locator to become hidden or be removed.
+    pub async fn wait_ele_hidden(&self, locator_str: &str, timeout_secs: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let selector = {
+            let locator = crate::locator::parse_locator(locator_str)?;
+            locator_to_selector(&locator)?
+        };
+        loop {
+            match self.page.find_element(&selector).await {
+                Ok(_) => {
+                    // Element still exists, check if visible via JS
+                    let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+                    let js = format!(
+                        "!!(document.querySelector('{s}')?.offsetWidth || document.querySelector('{s}')?.offsetHeight)",
+                        s = escaped
+                    );
+                    let visible = self
+                        .page
+                        .evaluate(js.as_str())
+                        .await
+                        .ok()
+                        .and_then(|r| r.value().cloned())
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    if !visible {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Element not found = gone
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_ele_hidden '{}' timed out after {}s",
+                    locator_str, timeout_secs
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Wait for an element matching the locator to be removed from the DOM entirely.
+    pub async fn wait_ele_deleted(&self, locator_str: &str, timeout_secs: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let selector = {
+            let locator = crate::locator::parse_locator(locator_str)?;
+            locator_to_selector(&locator)?
+        };
+        loop {
+            match self.page.find_element(&selector).await {
+                Ok(_) => {
+                    // Still exists
+                }
+                Err(_) => {
+                    // Element gone
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_ele_deleted '{}' timed out after {}s",
+                    locator_str, timeout_secs
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
     /// Wait for page title to contain the given text.
     pub async fn wait_title_contains(&self, text: &str, timeout_secs: u64) -> Result<()> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -925,8 +1025,8 @@ impl ChromiumPage {
     /// Get the HTML content of an iframe identified by CSS selector.
     pub async fn frame_html(&self, selector: &str) -> Result<String> {
         let js = format!(
-            "document.querySelector('{sel}').contentDocument.documentElement.outerHTML",
-            sel = selector.replace('\'', "\\'")
+            "document.querySelector({sel}).contentDocument.documentElement.outerHTML",
+            sel = serde_json::to_string(selector).unwrap()
         );
         self.page
             .evaluate(js.as_str())
@@ -941,9 +1041,9 @@ impl ChromiumPage {
     /// Execute JavaScript inside an iframe identified by CSS selector.
     pub async fn frame_execute(&self, selector: &str, js_code: &str) -> Result<serde_json::Value> {
         let js = format!(
-            "(function(){{ var f = document.querySelector('{sel}'); if(!f) return null; return (function(){{ {code} }}).call(f.contentWindow); }})()",
-            sel = selector.replace('\'', "\\'"),
-            code = js_code.replace('\'', "\\'")
+            "(function(){{ var f = document.querySelector({sel}); if(!f) return null; return (function(){{ {code} }}).call(f.contentWindow); }})()",
+            sel = serde_json::to_string(selector).unwrap(),
+            code = js_code
         );
         let r = self
             .page
@@ -1047,9 +1147,4 @@ impl ChromiumPage {
     pub fn download_manager(&self) -> &Arc<DownloadManager> {
         &self.download_manager
     }
-}
-
-/// Convert our Locator to a CSS/XPath selector string for chromiumoxide.
-fn locator_to_selector(locator: &crate::locator::Locator) -> Result<String> {
-    crate::locator::locator_to_selector(locator)
 }

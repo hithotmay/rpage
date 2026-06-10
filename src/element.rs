@@ -7,7 +7,7 @@ use chromiumoxide::Page;
 use scraper::Selector;
 
 use crate::error::{Error, Result};
-use crate::locator::{parse_locator, Locator};
+use crate::locator::{locator_to_selector, parse_locator, Locator};
 
 // ── Page identity ────────────────────────────────────────────
 
@@ -132,16 +132,69 @@ impl Element {
         self.page.is_some()
     }
 
-    /// True if element has non-hidden style.
+    /// True if element has non-hidden style (synchronous, checks cached HTML).
+    ///
+    /// For a more accurate async check, use [`is_visible()`](Element::is_visible).
     pub fn is_displayed(&self) -> bool {
-        !self.html.contains("display:none")
-            && !self.html.contains("display: none")
-            && !self.html.contains("hidden")
+        let html = self.html.to_lowercase();
+        if html.contains("display:none")
+            || html.contains("display: none")
+            || html.contains("hidden")
+        {
+            return false;
+        }
+        // Additional checks for elements with CDP backing
+        if self.object_id.is_some()
+            && (html.contains("visibility:hidden") || html.contains("visibility: hidden"))
+        {
+            return false;
+        }
+        !html.is_empty()
     }
 
     /// True if not disabled.
     pub fn is_enabled(&self) -> bool {
         !self.attrs.iter().any(|(k, _)| k == "disabled")
+    }
+
+    /// Check if element is actually visible (async, uses getBoundingClientRect).
+    ///
+    /// Uses JavaScript `offsetWidth`, `offsetHeight`, and `getClientRects()` to
+    /// determine real visibility. Falls back to [`is_displayed()`](Element::is_displayed)
+    /// for non-CDP elements.
+    pub async fn is_visible(&self) -> bool {
+        let page = match self.page.as_ref() {
+            Some(p) => p,
+            None => return self.is_displayed(),
+        };
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let fn_decl = "function() { return !!(this.offsetWidth || this.offsetHeight || this.getClientRects().length); }";
+                let params = match CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(fn_decl)
+                    .return_by_value(true)
+                    .build()
+                {
+                    Ok(p) => p,
+                    Err(_) => return self.is_displayed(),
+                };
+                match page.execute(params).await {
+                    Ok(result) => result
+                        .result
+                        .result
+                        .value
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    Err(_) => self.is_displayed(),
+                }
+            } else {
+                self.is_displayed()
+            }
+        } else {
+            self.is_displayed()
+        }
     }
 
     /// The locator used to find this element.
@@ -161,7 +214,7 @@ impl Element {
             .locator
             .as_ref()
             .ok_or(Error::Browser("no locator for element".into()))?;
-        let selector = locator_to_query(locator)?;
+        let selector = locator_to_selector(locator)?;
         page.find_element(&selector)
             .await
             .map_err(|e| Error::Browser(format!("re-resolve element: {e}")))
@@ -207,7 +260,7 @@ impl Element {
     pub async fn fill(&self, text: &str) -> Result<()> {
         // Use JS directly — most reliable, works with all characters including Chinese.
         // Use the element's own prototype chain so it works for both input and textarea.
-        let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = serde_json::to_string(text).unwrap();
         let js = format!(
             "(function() {{ \
                this.focus(); \
@@ -219,7 +272,7 @@ impl Element {
                  proto = Object.getPrototypeOf(proto); \
                }} \
                if (desc && desc.set) {{ \
-                 desc.set.call(this, '{}'); \
+                 desc.set.call(this, {}); \
                  this.dispatchEvent(new Event('input', {{bubbles: true}})); \
                  this.dispatchEvent(new Event('change', {{bubbles: true}})); \
                }} \
@@ -362,8 +415,8 @@ impl Element {
             if !oid.is_empty() {
                 use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
                 let function_decl = format!(
-                    "function() {{ return getComputedStyle(this).getPropertyValue('{}'); }}",
-                    property.replace('\'', "\\'")
+                    "function() {{ return getComputedStyle(this).getPropertyValue({}); }}",
+                    serde_json::to_string(property).unwrap()
                 );
                 let params = CallFunctionOnParams::builder()
                     .object_id(oid.clone())
@@ -391,12 +444,12 @@ impl Element {
 
     /// Select an option in a `<select>` element by visible text.
     pub async fn select(&self, text: &str) -> Result<()> {
-        let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = serde_json::to_string(text).unwrap();
         let js = format!(
             "(function() {{ \
                var opts = this.options; \
                for (var i = 0; i < opts.length; i++) {{ \
-                 if (opts[i].text === '{}') {{ \
+                 if (opts[i].text === {}) {{ \
                    this.selectedIndex = i; \
                    opts[i].selected = true; \
                    this.dispatchEvent(new Event('change', {{bubbles: true}})); \
@@ -411,12 +464,12 @@ impl Element {
 
     /// Select an option by its value attribute.
     pub async fn select_by_value(&self, value: &str) -> Result<()> {
-        let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = serde_json::to_string(value).unwrap();
         let js = format!(
             "(function() {{ \
                var opts = this.options; \
                for (var i = 0; i < opts.length; i++) {{ \
-                 if (opts[i].value === '{}') {{ \
+                 if (opts[i].value === {}) {{ \
                    this.selectedIndex = i; \
                    opts[i].selected = true; \
                    this.dispatchEvent(new Event('change', {{bubbles: true}})); \
@@ -578,11 +631,84 @@ impl Element {
         Ok(())
     }
 
+    /// Drag this element by an offset (relative movement).
+    pub async fn drag_to_offset(&self, offset_x: f64, offset_y: f64) -> Result<()> {
+        let src = self.cdp_element().await?;
+        let _ = src.scroll_into_view().await;
+
+        let src_bbox = src
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
+
+        let src_x = src_bbox.x + src_bbox.width / 2.0;
+        let src_y = src_bbox.y + src_bbox.height / 2.0;
+        let tgt_x = src_x + offset_x;
+        let tgt_y = src_y + offset_y;
+
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| Error::Browser("drag_to_offset requires Chromium mode".into()))?;
+
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+        };
+
+        // Move to source
+        let move_to_src = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseMoved)
+            .x(src_x)
+            .y(src_y)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(move_to_src).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Press at source
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(src_x)
+            .y(src_y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(press).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Move to target
+        let move_to_tgt = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseMoved)
+            .x(tgt_x)
+            .y(tgt_y)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(move_to_tgt).await.ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Release at target
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(tgt_x)
+            .y(tgt_y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(release).await.ok();
+
+        Ok(())
+    }
+
     /// Set an attribute on this element.
     pub async fn set_attr(&self, name: &str, value: &str) -> Result<()> {
-        let escaped_name = name.replace('\\', "\\\\").replace('\'', "\\'");
-        let escaped_value = value.replace('\\', "\\\\").replace('\'', "\\'");
-        let js = format!("this.setAttribute('{}', '{}')", escaped_name, escaped_value);
+        let escaped_name = serde_json::to_string(name).unwrap();
+        let escaped_value = serde_json::to_string(value).unwrap();
+        let js = format!("this.setAttribute({}, {})", escaped_name, escaped_value);
         self.js(&js).await
     }
 
@@ -683,10 +809,10 @@ impl Element {
             .ok_or(Error::Browser("no locator for element".into()))?;
 
         let wrapped = if locator.is_css() {
-            let selector = locator_to_query(locator)?;
+            let selector = locator_to_selector(locator)?;
             format!(
-                "(function(){{ var el = document.querySelector('{}'); if(!el) return; (function(){{ {} }}).call(el); }})()",
-                selector.replace('\\', "\\\\").replace('\'', "\\'"),
+                "(function(){{ var el = document.querySelector({}); if(!el) return; (function(){{ {} }}).call(el); }})()",
+                serde_json::to_string(&selector).unwrap(),
                 script,
             )
         } else {
@@ -695,8 +821,8 @@ impl Element {
                 .to_xpath()
                 .ok_or_else(|| Error::InvalidLocator("cannot convert to XPath".into()))?;
             format!(
-                "(function(){{ var result = document.evaluate('{}', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); var el = result.singleNodeValue; if(!el) return; (function(){{ {} }}).call(el); }})()",
-                xpath.replace('\\', "\\\\").replace('\'', "\\'"),
+                "(function(){{ var result = document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); var el = result.singleNodeValue; if(!el) return; (function(){{ {} }}).call(el); }})()",
+                serde_json::to_string(&xpath).unwrap(),
                 script,
             )
         };
@@ -795,11 +921,6 @@ impl Element {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
-
-/// Convert Locator to a CSS query selector for use in page.evaluate.
-fn locator_to_query(locator: &Locator) -> Result<String> {
-    crate::locator::locator_to_selector(locator)
-}
 
 /// Build a session-mode Element from a scraper::ElementRef.
 pub(crate) fn from_scraper_element(

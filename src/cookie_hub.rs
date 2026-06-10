@@ -124,6 +124,58 @@ impl CookieHub {
         debug!("Cleared all cookies");
         Ok(())
     }
+
+    /// Save all cookies to a JSON file.
+    pub fn save_to_file(&self, path: &str) -> Result<()> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|e| Error::CookieSync(format!("cookie store lock poisoned: {e}")))?;
+        let cookies: Vec<serde_json::Value> = store
+            .iter_unexpired()
+            .map(|c| {
+                let domain_str = match &c.domain {
+                    cookie_store::CookieDomain::Suffix(d) => d.as_str(),
+                    cookie_store::CookieDomain::HostOnly(d) => d.as_str(),
+                    _ => "",
+                };
+                serde_json::json!({
+                    "name": c.name(),
+                    "value": c.value(),
+                    "domain": domain_str,
+                    "path": c.path.to_string(),
+                })
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&cookies)?;
+        std::fs::write(path, json)?;
+        debug!("Saved cookies to {path}");
+        Ok(())
+    }
+
+    /// Load cookies from a JSON file.
+    pub fn load_from_file(&self, path: &str) -> Result<()> {
+        let json = std::fs::read_to_string(path)?;
+        let cookies: Vec<serde_json::Value> = serde_json::from_str(&json)?;
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|e| Error::CookieSync(format!("cookie store lock poisoned: {e}")))?;
+        for c in cookies {
+            let name = c["name"].as_str().unwrap_or("");
+            let value = c["value"].as_str().unwrap_or("");
+            let domain = c["domain"].as_str().unwrap_or("");
+            let cpath = c["path"].as_str().unwrap_or("/");
+            let cookie_str = format!("{name}={value}; Domain={domain}; Path={cpath}");
+            let url = url::Url::parse(&format!("https://{domain}"))
+                .unwrap_or_else(|_| url::Url::parse("https://example.com").unwrap());
+            if let Ok(parsed) = cookie_store::Cookie::parse(cookie_str, &url) {
+                let _ = store.insert(parsed, &url);
+            }
+        }
+        debug!("Loaded cookies from {path}");
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for CookieHub {

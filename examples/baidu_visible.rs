@@ -1,11 +1,18 @@
 //! 非无头模式演示 — 弹出真实 Chrome 窗口
 
-use rpage::WebPage;
+use rpage::prelude::*;
 
 #[tokio::main]
 async fn main() -> rpage::Result<()> {
     println!("🚀 启动浏览器（非无头模式）...");
-    let page = WebPage::new().await?;
+    let opts = WebPageOptions {
+        chromium: ChromiumOptions {
+            headless: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let page = WebPage::with_options(opts).await?;
 
     println!("📡 导航到百度...");
     page.get("https://www.baidu.com").await?;
