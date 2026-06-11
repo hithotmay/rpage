@@ -3685,10 +3685,12 @@ impl ChromiumPage {
         Ok(())
     }
 
-    /// Override geolocation and reload.
+    /// Override geolocation and reload the current page.
     pub async fn set_location_and_reload(&self, lat: f64, lng: f64) -> Result<()> {
         self.set_geolocation(lat, lng).await?;
-        self.get("javascript:void(0)").await?;
+        self.page.execute(
+            chromiumoxide::cdp::browser_protocol::page::ReloadParams::default(),
+        ).await.map_err(|e| Error::Browser(format!("reload: {e}")))?;
         Ok(())
     }
 
@@ -3712,9 +3714,12 @@ impl ChromiumPage {
             .unwrap_or_default())
     }
 
-    /// Disable images via Network.setBlockedUrls.
+    /// Disable images via Network.setBlockedUrls (URLPattern syntax, absolute).
     pub async fn disable_images(&self) -> Result<()> {
-        self.set_blocked_urls(&["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico"]).await
+        self.set_blocked_urls(&[
+            "*://*/*/*.png", "*://*/*/*.jpg", "*://*/*/*.jpeg",
+            "*://*/*/*.gif", "*://*/*/*.webp", "*://*/*/*.svg", "*://*/*/*.ico",
+        ]).await
     }
 
     /// Override the device scale factor.
