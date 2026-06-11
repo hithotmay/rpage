@@ -16,6 +16,24 @@ use chromiumoxide::Page;
 
 use crate::error::{Error, Result};
 
+/// Lightweight info passed to request callbacks registered via `ChromiumPage::on_request`.
+#[derive(Debug, Clone)]
+pub struct RequestInfo {
+    pub url: String,
+    pub method: String,
+    pub resource_type: String,
+    pub request_id: String,
+}
+
+/// Lightweight info passed to response callbacks registered via `ChromiumPage::on_response`.
+#[derive(Debug, Clone)]
+pub struct ResponseInfo {
+    pub url: String,
+    pub status: u16,
+    pub mime_type: String,
+    pub request_id: String,
+}
+
 /// A recorded HTTP request
 #[derive(Debug, Clone)]
 pub struct RequestRecord {
@@ -44,12 +62,46 @@ pub struct FailedRequest {
     pub error_text: String,
 }
 
+type RequestCallback = Box<dyn Fn(RequestInfo) + Send>;
+type ResponseCallback = Box<dyn Fn(ResponseInfo) + Send>;
+
 /// Network monitor that records all requests and responses
-#[derive(Debug, Clone, Default)]
 pub struct NetworkMonitor {
     requests: Arc<Mutex<Vec<RequestRecord>>>,
     responses: Arc<Mutex<Vec<ResponseRecord>>>,
     failures: Arc<Mutex<Vec<FailedRequest>>>,
+    /// User-registered request callbacks (via `ChromiumPage::on_request`).
+    request_listeners: Arc<Mutex<Vec<RequestCallback>>>,
+    /// User-registered response callbacks (via `ChromiumPage::on_response`).
+    response_listeners: Arc<Mutex<Vec<ResponseCallback>>>,
+}
+
+impl std::fmt::Debug for NetworkMonitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkMonitor")
+            .field("requests", &self.requests)
+            .field("responses", &self.responses)
+            .field("failures", &self.failures)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for NetworkMonitor {
+    fn clone(&self) -> Self {
+        Self {
+            requests: self.requests.clone(),
+            responses: self.responses.clone(),
+            failures: self.failures.clone(),
+            request_listeners: self.request_listeners.clone(),
+            response_listeners: self.response_listeners.clone(),
+        }
+    }
+}
+
+impl Default for NetworkMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NetworkMonitor {
@@ -59,27 +111,87 @@ impl NetworkMonitor {
             requests: Arc::new(Mutex::new(Vec::new())),
             responses: Arc::new(Mutex::new(Vec::new())),
             failures: Arc::new(Mutex::new(Vec::new())),
+            request_listeners: Arc::new(Mutex::new(Vec::new())),
+            response_listeners: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Record an outgoing request
+    /// Record an outgoing request and fire any registered request callbacks.
     pub fn record_request(&self, req: RequestRecord) {
+        // Build lightweight info *before* moving req into the vec
+        let info = RequestInfo {
+            url: req.url.clone(),
+            method: req.method.clone(),
+            resource_type: req.resource_type.clone(),
+            request_id: req.request_id.clone(),
+        };
         if let Ok(mut list) = self.requests.lock() {
             list.push(req);
         }
+        self.fire_request_listeners(info);
     }
 
-    /// Record a received response
+    /// Record a received response and fire any registered response callbacks.
     pub fn record_response(&self, resp: ResponseRecord) {
+        // Build lightweight info *before* moving resp into the vec
+        let info = ResponseInfo {
+            url: resp.url.clone(),
+            status: resp.status,
+            mime_type: resp.mime_type.clone(),
+            request_id: resp.request_id.clone(),
+        };
         if let Ok(mut list) = self.responses.lock() {
             list.push(resp);
         }
+        self.fire_response_listeners(info);
     }
 
     /// Record a failed request
     pub fn record_failure(&self, fail: FailedRequest) {
         if let Ok(mut list) = self.failures.lock() {
             list.push(fail);
+        }
+    }
+
+    // ── Listener registration ──────────────────────────────────
+
+    /// Register a callback that will be invoked for every recorded request.
+    pub fn add_request_listener<F: Fn(RequestInfo) + Send + 'static>(&self, callback: F) {
+        if let Ok(mut listeners) = self.request_listeners.lock() {
+            listeners.push(Box::new(callback));
+        }
+    }
+
+    /// Register a callback that will be invoked for every recorded response.
+    pub fn add_response_listener<F: Fn(ResponseInfo) + Send + 'static>(&self, callback: F) {
+        if let Ok(mut listeners) = self.response_listeners.lock() {
+            listeners.push(Box::new(callback));
+        }
+    }
+
+    /// Clear all registered request and response callbacks.
+    pub fn clear_listeners(&self) {
+        if let Ok(mut l) = self.request_listeners.lock() {
+            l.clear();
+        }
+        if let Ok(mut l) = self.response_listeners.lock() {
+            l.clear();
+        }
+    }
+
+    fn fire_request_listeners(&self, info: RequestInfo) {
+        if let Ok(listeners) = self.request_listeners.lock() {
+            for cb in listeners.iter() {
+                cb(info.clone());
+            }
+        }
+    }
+
+    fn fire_response_listeners(&self, info: ResponseInfo) {
+        if let Ok(listeners) = self.response_listeners.lock() {
+            for cb in listeners.iter() {
+                cb(info.clone());
+            }
         }
     }
 

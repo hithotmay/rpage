@@ -2240,6 +2240,222 @@ impl ChromiumPage {
         Ok(())
     }
 
+    // ── DrissionPage-style convenience: wait URL/title exact ──
+
+    /// Wait for the page URL to **exactly match** `expected`.
+    ///
+    /// Polls every 200 ms until `window.location.href == expected` or the
+    /// timeout elapses.
+    ///
+    /// ```ignore
+    /// page.wait_url_is("https://example.com/dashboard", 10).await?;
+    /// ```
+    pub async fn wait_url_is(&self, expected: &str, timeout_secs: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let current = self.url().await.unwrap_or_default();
+            if current == expected {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_url_is '{}' timed out (current: '{}')",
+                    expected, current
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Wait for the page title to **exactly match** `expected`.
+    ///
+    /// Polls every 200 ms until `document.title == expected` or the
+    /// timeout elapses.
+    ///
+    /// ```ignore
+    /// page.wait_title_is("My Dashboard", 10).await?;
+    /// ```
+    pub async fn wait_title_is(&self, expected: &str, timeout_secs: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let title = self.title().await.unwrap_or_default();
+            if title == expected {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_title_is '{}' timed out (current: '{}')",
+                    expected, title
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    // ── DrissionPage-style aliases ─────────────────────────────
+
+    /// Alias for [`url()`](Self::url) — DrissionPage uses `current_url`.
+    ///
+    /// ```ignore
+    /// let u = page.current_url().await?;
+    /// ```
+    pub async fn current_url(&self) -> Result<String> {
+        self.url().await
+    }
+
+    /// Alias for [`title()`](Self::title) — DrissionPage uses `current_title`.
+    ///
+    /// ```ignore
+    /// let t = page.current_title().await?;
+    /// ```
+    pub async fn current_title(&self) -> Result<String> {
+        self.title().await
+    }
+
+    /// Alias for [`html()`](Self::html) — DrissionPage uses `page_source`.
+    ///
+    /// ```ignore
+    /// let src = page.page_source().await?;
+    /// ```
+    pub async fn page_source(&self) -> Result<String> {
+        self.html().await
+    }
+
+    /// Re-locate an element in the live DOM using its original locator.
+    ///
+    /// Returns a fresh `Element` whose HTML, text, attributes, and CDP
+    /// object-id reflect the current state of the page.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the element has no stored locator or the element
+    /// no longer exists in the DOM.
+    ///
+    /// ```ignore
+    /// let el = page.ele("#btn").await?;
+    /// // ... page changes ...
+    /// let el = page.refresh_ele(&el).await?;
+    /// el.click().await?;
+    /// ```
+    pub async fn refresh_ele(&self, el: &Element) -> Result<Element> {
+        let locator = el
+            .locator()
+            .ok_or_else(|| Error::Browser("element has no locator".into()))?;
+        let selector = locator_to_selector(locator)?;
+        let cdp_el = self.wait_for_element(&selector, self.opts.timeout.as_secs()).await?;
+        self.build_element_from_cdp(cdp_el, locator.clone()).await
+    }
+
+    /// Type text into the first element matching `selector` in **append** mode.
+    ///
+    /// Unlike [`type_text`](Self::type_text) which clears the field first
+    /// (via `fill`), this uses the element's `input` method to append text
+    /// at the current cursor position. Returns `&self` for chaining.
+    ///
+    /// ```ignore
+    /// page.input_text("#search", " world").await?.click_ele("#go").await?;
+    /// ```
+    pub async fn input_text(&self, selector: &str, text: &str) -> Result<&Self> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        ele.input(text).await?;
+        Ok(self)
+    }
+
+    /// Hover over the first element matching `selector` (wait + hover).
+    ///
+    /// Waits up to the default timeout for the element to appear, then
+    /// scrolls it into view and hovers. Returns `&self` for chaining.
+    ///
+    /// ```ignore
+    /// page.hover_ele("#menu-item").await?;
+    /// ```
+    pub async fn hover_ele(&self, selector: &str) -> Result<&Self> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        ele.hover().await?;
+        Ok(self)
+    }
+
+    /// Scroll the first element matching `selector` into view (wait + scroll).
+    ///
+    /// Waits up to the default timeout for the element to appear, then
+    /// scrolls it into the viewport. Returns `&self` for chaining.
+    ///
+    /// ```ignore
+    /// page.scroll_to_ele("#section-3").await?;
+    /// ```
+    pub async fn scroll_to_ele(&self, selector: &str) -> Result<&Self> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        ele.scroll_into_view().await?;
+        Ok(self)
+    }
+
+    /// Quick check: does at least one element matching `selector` exist?
+    ///
+    /// Returns `true` if `querySelector` finds a match, `false` otherwise.
+    /// Never throws — safe to use in `if` guards.
+    ///
+    /// ```ignore
+    /// if page.exists("#popup").await {
+    ///     page.click_ele("#close").await?;
+    /// }
+    /// ```
+    pub async fn exists(&self, selector: &str) -> bool {
+        let locator = match crate::locator::parse_locator(selector) {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+        let css = match locator_to_selector(&locator) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        self.page.find_element(&css).await.is_ok()
+    }
+
+    /// Count how many elements currently match `selector`.
+    ///
+    /// Returns `0` if no elements are found or the selector is invalid.
+    ///
+    /// ```ignore
+    /// let n = page.count(".item").await;
+    /// println!("{n} items on page");
+    /// ```
+    pub async fn count(&self, selector: &str) -> usize {
+        let locator = match crate::locator::parse_locator(selector) {
+            Ok(l) => l,
+            Err(_) => return 0,
+        };
+        let css = match locator_to_selector(&locator) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        self.page
+            .find_elements(&css)
+            .await
+            .map(|els| els.len())
+            .unwrap_or(0)
+    }
+
+    /// Find the first element matching `selector`, or `None` if it doesn't exist.
+    ///
+    /// Unlike [`ele`](Self::ele) which retries and then returns an error,
+    /// this performs a single query and silently returns `None` when the
+    /// element is absent.
+    ///
+    /// ```ignore
+    /// if let Some(el) = page.ele_or_none("#optional").await {
+    ///     el.click().await?;
+    /// }
+    /// ```
+    pub async fn ele_or_none(&self, selector: &str) -> Option<Element> {
+        let locator = crate::locator::parse_locator(selector).ok()?;
+        let css = locator_to_selector(&locator).ok()?;
+        let cdp_el = self.page.find_element(&css).await.ok()?;
+        self.build_element_from_cdp(cdp_el, locator).await.ok()
+    }
+
     // ── Permissions (f27) ────────────────────────────────────
 
     /// Grant browser permissions for the given origin.
@@ -2310,6 +2526,39 @@ impl ChromiumPage {
     /// Get the console monitor.
     pub fn console_monitor(&self) -> &Arc<ConsoleMonitor> {
         &self.console_monitor
+    }
+
+    // ── Network listener callbacks (DrissionPage-style listen) ──────
+
+    /// Register a callback that fires for every network request.
+    ///
+    /// ```ignore
+    /// page.on_request(|req| println!("Request: {} {}", req.method, req.url))?;
+    /// ```
+    pub fn on_request<F: Fn(crate::network::RequestInfo) + Send + 'static>(
+        &self,
+        callback: F,
+    ) -> Result<()> {
+        self.network_monitor.add_request_listener(callback);
+        Ok(())
+    }
+
+    /// Register a callback that fires for every network response.
+    ///
+    /// ```ignore
+    /// page.on_response(|res| println!("Response: {} {}", res.status, res.url))?;
+    /// ```
+    pub fn on_response<F: Fn(crate::network::ResponseInfo) + Send + 'static>(
+        &self,
+        callback: F,
+    ) -> Result<()> {
+        self.network_monitor.add_response_listener(callback);
+        Ok(())
+    }
+
+    /// Clear all registered request/response listener callbacks.
+    pub fn clear_listeners(&self) {
+        self.network_monitor.clear_listeners();
     }
 
     /// Get all captured console log entries.

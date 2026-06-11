@@ -824,6 +824,54 @@ impl WebPage {
             .await
     }
 
+    // ── Session convenience proxies ──────────────────────────
+
+    /// Session GET request (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_get(&self, url: &str) -> Result<String> {
+        self.session.borrow_mut().get(url).await
+    }
+
+    /// Session POST request with plain text body (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_post(&self, url: &str, body: &str) -> Result<String> {
+        self.session.borrow_mut().post(url, body.to_string()).await
+    }
+
+    /// Session PUT request with plain text body (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_put(&self, url: &str, body: &str) -> Result<String> {
+        self.session.borrow_mut().put(url, body.to_string()).await
+    }
+
+    /// Session DELETE request (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_delete(&self, url: &str) -> Result<String> {
+        self.session.borrow_mut().delete(url).await
+    }
+
+    /// Session HEAD request (Session mode). Returns the HTTP status code.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_head(&self, url: &str) -> Result<reqwest::StatusCode> {
+        self.session.borrow_mut().head(url).await
+    }
+
+    /// Session POST JSON request (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_post_json(
+        &self,
+        url: &str,
+        json: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        self.session.borrow_mut().post_json(url, json).await
+    }
+
+    /// Session PATCH request with plain text body (Session mode).
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn session_patch(&self, url: &str, body: &str) -> Result<String> {
+        self.session.borrow_mut().patch(url, body.to_string()).await
+    }
+
     // ── Cookie save/load ────────────────────────────────────
 
     /// Save all cookies to a JSON file.
@@ -1312,6 +1360,113 @@ impl WebPage {
             .ok_or_else(|| Error::Browser("keys requires Chromium mode".into()))?
             .keys(text)
             .await
+    }
+
+    // ── DrissionPage-style convenience aliases & helpers ───
+
+    /// Alias for [`url()`](Self::url) — DrissionPage uses `current_url`.
+    pub async fn current_url(&self) -> Result<String> {
+        self.url().await
+    }
+
+    /// Alias for [`title()`](Self::title) — DrissionPage uses `current_title`.
+    pub async fn current_title(&self) -> Result<String> {
+        self.title().await
+    }
+
+    /// Alias for [`html()`](Self::html) — DrissionPage uses `page_source`.
+    pub async fn page_source(&self) -> Result<String> {
+        self.html().await
+    }
+
+    /// Wait for the page URL to **exactly match** `expected` (Chromium only).
+    pub async fn wait_url_is(&self, expected: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_url_is requires Chromium mode".into()))?
+            .wait_url_is(expected, timeout_secs)
+            .await
+    }
+
+    /// Wait for the page title to **exactly match** `expected` (Chromium only).
+    pub async fn wait_title_is(&self, expected: &str, timeout_secs: u64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_title_is requires Chromium mode".into()))?
+            .wait_title_is(expected, timeout_secs)
+            .await
+    }
+
+    /// Re-locate an element in the live DOM using its original locator (Chromium only).
+    pub async fn refresh_ele(&self, el: &Element) -> Result<Element> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("refresh_ele requires Chromium mode".into()))?
+            .refresh_ele(el)
+            .await
+    }
+
+    /// Type text into the first element matching `selector` in **append** mode (Chromium only).
+    ///
+    /// Unlike [`type_text`](Self::type_text) which clears the field first, this appends.
+    /// Returns `&self` for chaining.
+    pub async fn input_text(&self, selector: &str, text: &str) -> Result<&WebPage> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("input_text requires Chromium mode".into()))?
+            .input_text(selector, text)
+            .await?;
+        Ok(self)
+    }
+
+    /// Hover over the first element matching `selector` — wait + hover (Chromium only).
+    pub async fn hover_ele(&self, selector: &str) -> Result<&WebPage> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("hover_ele requires Chromium mode".into()))?
+            .hover_ele(selector)
+            .await?;
+        Ok(self)
+    }
+
+    /// Scroll the first element matching `selector` into view — wait + scroll (Chromium only).
+    pub async fn scroll_to_ele(&self, selector: &str) -> Result<&WebPage> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll_to_ele requires Chromium mode".into()))?
+            .scroll_to_ele(selector)
+            .await?;
+        Ok(self)
+    }
+
+    /// Quick check: does at least one element matching `selector` exist? (Chromium only)
+    ///
+    /// Returns `false` in Session mode. Never throws.
+    pub async fn exists(&self, selector: &str) -> bool {
+        match self.chromium.as_ref() {
+            Some(c) => c.exists(selector).await,
+            None => false,
+        }
+    }
+
+    /// Count how many elements currently match `selector` (Chromium only).
+    ///
+    /// Returns `0` in Session mode or when the selector is invalid.
+    pub async fn count(&self, selector: &str) -> usize {
+        match self.chromium.as_ref() {
+            Some(c) => c.count(selector).await,
+            None => 0,
+        }
+    }
+
+    /// Find the first element matching `selector`, or `None` if absent (Chromium only).
+    ///
+    /// Returns `None` in Session mode.
+    pub async fn ele_or_none(&self, selector: &str) -> Option<Element> {
+        match self.chromium.as_ref() {
+            Some(c) => c.ele_or_none(selector).await,
+            None => None,
+        }
     }
 
     // ── Load strategy ────────────────────────────────────────

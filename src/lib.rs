@@ -38,6 +38,7 @@ pub use element::ElementBatch;
 pub use error::{Error, Result};
 pub use locator::{parse_locator, IntoLocator, Locator};
 pub use network::NetworkMonitor;
+pub use network::{RequestInfo, ResponseInfo};
 pub use session_page::SessionPage;
 pub use stealth::StealthConfig;
 pub use wait::WaitOptions;
