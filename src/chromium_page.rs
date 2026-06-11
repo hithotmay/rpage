@@ -1411,11 +1411,11 @@ impl ChromiumPage {
 
         self.init_scripts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(name.to_string(), js.to_string());
         self.init_script_ids
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(name.to_string(), result.identifier.clone());
         Ok(())
     }
@@ -1428,10 +1428,10 @@ impl ChromiumPage {
         let id = self
             .init_script_ids
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(name)
             .ok_or_else(|| Error::Browser(format!("init script not found: {name}")))?;
-        self.init_scripts.lock().unwrap().remove(name);
+        self.init_scripts.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
 
         let params = RemoveScriptToEvaluateOnNewDocumentParams::new(id);
         self.page
@@ -1443,7 +1443,7 @@ impl ChromiumPage {
 
     /// List all registered init script names.
     pub fn list_init_scripts(&self) -> Vec<String> {
-        self.init_scripts.lock().unwrap().keys().cloned().collect()
+        self.init_scripts.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
     }
 
     // ── Screenshot ───────────────────────────────────────────

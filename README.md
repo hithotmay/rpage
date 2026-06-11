@@ -1,6 +1,6 @@
 # rpage 🦀🌐
 
-> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**470 个公开方法，9,195 行 Rust**。
+> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**523 个公开方法，10,724 行 Rust**。
 
 `rpage` 是一个受 [DrissionPage](https://github.com/g1879/DrissionPage) 启发的 Rust 浏览器自动化库。
 
@@ -13,6 +13,9 @@
 - **智能等待** — `get()` 等加载，`ele()`/`eles()` 自动重试，超时可配置
 - **中文完美** — `fill()` 用 JS `nativeInputValueSetter`
 - **鲁棒交互** — `click()` 自动 fallback CDP→JS，拖拽到元素或坐标
+- **链式调用** — `page.goto(url).await?.type_text("#kw", "rust").await?` 一行完成导航+输入
+- **一步到位 API** — `click_ele()`/`get_text()`/`get_attr()` 无需先 `ele()` 再操作
+- **网络包实时监听** — `on_request()`/`on_response()` 回调式捕获每个请求和响应
 - **标签页管理** — 创建/切换/关闭/列表
 - **条件等待** — 等元素出现/消失/删除，等标题/URL 变化，等 JS 表达式
 - **Element 等待** — wait_for_visible/hidden/stale/clickable/enabled/text/attribute
@@ -54,6 +57,15 @@ async fn main() -> rpage::Result<()> {
 }
 ```
 
+### 链式调用 — 一行完成复杂操作
+
+```rust
+// 链式：导航 → 输入 → 点击，一步到位
+page.goto("https://www.baidu.com").await?
+    .type_text("#kw", "rust教程").await?
+    .click_ele("#su").await?;
+```
+
 ## 📦 安装
 
 ```toml
@@ -61,7 +73,45 @@ async fn main() -> rpage::Result<()> {
 rpage = "0.1"
 ```
 
-## 📖 API 参考 (470 方法)
+## 📖 API 参考 (523 方法)
+
+### 链式便捷 API (8)
+
+无需先 `ele()` 再操作，一步到位。所有方法返回 `&Self`，支持链式调用。
+
+```rust
+page.goto(url).await?;                       // 导航（返回 &Self）
+page.type_text("#kw", "rust教程").await?;    // 定位+清空+输入
+page.click_ele("#btn").await?;               // 定位+点击
+page.get_text("h1").await?;                  // 定位+获取文本
+page.get_attr("#link", "href").await?;       // 定位+获取属性
+page.input_text("#input", "追加文本").await?; // 定位+追加输入
+page.hover_ele("#menu").await?;              // 定位+悬停
+page.scroll_to_ele("#section").await?;       // 定位+滚动到元素
+
+// 链式组合示例
+page.goto("https://example.com").await?
+    .type_text("#search", "query").await?
+    .click_ele("#submit").await?;
+```
+
+### 快速查询 (3)
+
+```rust
+let exists = page.exists("#result").await?;     // bool — 元素是否存在
+let n = page.count("li.item").await?;           // usize — 匹配数量
+let el = page.ele_or_none("#opt").await?;       // Option<Element> — 无则 None
+```
+
+### DrissionPage 别名 (3)
+
+兼容 DrissionPage 命名习惯：
+
+```rust
+let url = page.current_url().await?;    // 等同 page.url()
+let title = page.current_title().await?; // 等同 page.title()
+let src = page.page_source().await?;    // 等同 page.html()
+```
 
 ### 页面导航 + 信息 (9)
 
@@ -95,7 +145,7 @@ let els = page.eles("h3").await?;
 | `text*:登录` | 文本包含 |
 | `tag:form@@text:登录` | 链式定位 |
 
-### 条件等待 (7)
+### 条件等待 (10)
 
 ```rust
 let el = page.wait_ele("#result", 10).await?;
@@ -105,6 +155,10 @@ page.wait_title_contains("搜索结果", 5).await?;
 page.wait_url_contains("search", 5).await?;
 page.wait_js("document.querySelectorAll('.item').length > 5", 10).await?;
 let dl = page.wait_download(30).await?;
+// ── 精确匹配等待 ──
+page.wait_url_is("https://example.com/done", 10).await?;
+page.wait_title_is("完成", 10).await?;
+page.wait_for_navigation(10).await?;
 ```
 
 ### 标签页 (6)
@@ -231,6 +285,7 @@ let visible = els.displayed();          // Vec<&Element>
 
 ```rust
 page.scroll_to(0, 500).await?;
+page.scroll_by(0, 300).await?;          // 相对滚动
 page.scroll_to_top().await?;
 page.scroll_to_bottom().await?;
 page.screenshot("shot.png").await?;
@@ -242,6 +297,8 @@ page.frame_html("iframe").await?;
 page.frame_execute("iframe", "document.title").await?;
 page.scroll_to_element(&el).await?;
 page.run_async_js("await fetch('/api')").await?;
+page.keys("hello world").await?;        // 逐字符输入（支持中文）
+page.refresh_ele(&el).await?;           // 重新定位元素
 ```
 
 ### 窗口管理 (7)
@@ -299,19 +356,45 @@ page.set_user_agent("Mozilla/5.0 ...").await?;
 page.set_viewport(1920, 1080).await?;
 ```
 
-### Session HTTP (10)
+### Session HTTP (7)
+
+```rust
+let resp = page.session_get(url).await?;
+let resp = page.session_post(url, body).await?;
+let resp = page.session_put(url, body).await?;
+let resp = page.session_delete(url).await?;
+let resp = page.session_head(url).await?;
+let resp = page.session_patch(url, body).await?;
+let resp = page.session_post_json(url, &data).await?;  // JSON body
+```
+
+此外还有：
 
 ```rust
 page.post(url, body).await?;
 page.post_multipart(url, fields, "file", "/path").await?;
-page.get(url).await?;      // 通用（非浏览器模式用 HTTP GET）
 page.post_json(url, data).await?;
-page.session_get(url).await?;
-page.session_post(url, body).await?;
-page.session_put(url, body).await?;
-page.session_delete(url).await?;
 page.session_download(url, "file.zip").await?;
 let status = page.session_status(url).await?;
+```
+
+### 网络包实时监听 (3)
+
+回调式捕获浏览器每个请求和响应：
+
+```rust
+// 监听请求
+page.on_request(|req| {
+    println!("→ {} {}", req.method, req.url);
+}).await?;
+
+// 监听响应
+page.on_response(|resp| {
+    println!("← {} {}", resp.status, resp.url);
+}).await?;
+
+// 清除所有监听器
+page.clear_listeners().await?;
 ```
 
 ### Console 捕获 (3)
@@ -446,14 +529,14 @@ page.options();           // Option<&ChromiumOptions>
 ## 项目结构
 
 ```
-rpage/  (9,195 行 Rust, 470 方法)
+rpage/  (10,724 行 Rust, 523 方法)
 ├── src/
-│   ├── chromium_page.rs  # CDP 浏览器控制 (160+ 方法)
+│   ├── chromium_page.rs  # CDP 浏览器控制 (170+ 方法)
 │   ├── element.rs        # 元素操作 (100+ 方法 + ElementBatch + Wait)
-│   ├── web_page.rs       # 统一双模式页 (80+ 方法)
+│   ├── web_page.rs       # 统一双模式页 (120+ 方法)
 │   ├── session_page.rs   # HTTP 会话 (25+ 方法)
 │   ├── download.rs       # 下载管理 (13 方法)
-│   ├── network.rs        # 网络监控 (13 方法)
+│   ├── network.rs        # 网络监控 + 实时监听 (16 方法)
 │   ├── locator.rs        # 定位器解析 (6 方法)
 │   ├── config.rs         # 配置 (24 方法)
 │   ├── stealth.rs        # 反检测 (5 方法)
@@ -464,8 +547,8 @@ rpage/  (9,195 行 Rust, 470 方法)
 │   ├── error.rs          # 错误类型
 │   ├── prelude.rs        # 预导入
 │   └── lib.rs            # 入口
-├── examples/             # 10 个示例
-└── tests/                # 21 个测试
+├── examples/             # 11 个示例
+└── tests/                # 145 个测试
 ```
 
 ## License
