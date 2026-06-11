@@ -1200,6 +1200,120 @@ impl WebPage {
             .await
     }
 
+    // ── DrissionPage-style convenience API (Chromium only) ──
+
+    /// Navigate to a URL and return `&self` for chaining (Chromium mode only).
+    ///
+    /// ```ignore
+    /// page.goto("https://example.com").await?.click_ele("#btn").await?;
+    /// ```
+    pub async fn goto(&self, url: &str) -> Result<&WebPage> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("goto requires Chromium mode".into()))?
+            .goto(url)
+            .await?;
+        Ok(self)
+    }
+
+    /// Type text into the first element matching `selector` — wait + fill in one step (Chromium only).
+    ///
+    /// ```ignore
+    /// page.type_text("#search", "hello").await?.click_ele("#go").await?;
+    /// ```
+    pub async fn type_text(&self, selector: &str, text: &str) -> Result<&WebPage> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("type_text requires Chromium mode".into()))?
+            .type_text(selector, text)
+            .await?;
+        Ok(self)
+    }
+
+    /// Click the first element matching `selector` — wait + click in one step (Chromium only).
+    ///
+    /// ```ignore
+    /// page.click_ele("#submit").await?;
+    /// ```
+    pub async fn click_ele(&self, selector: &str) -> Result<&WebPage> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("click_ele requires Chromium mode".into()))?
+            .click_ele(selector)
+            .await?;
+        Ok(self)
+    }
+
+    /// Get the visible text of the first element matching `selector` (Chromium only).
+    ///
+    /// ```ignore
+    /// let label = page.get_text("#result").await?;
+    /// ```
+    pub async fn get_text(&self, selector: &str) -> Result<String> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("get_text requires Chromium mode".into()))?
+            .get_text(selector)
+            .await
+    }
+
+    /// Get an attribute value from the first element matching `selector` (Chromium only).
+    ///
+    /// ```ignore
+    /// let href = page.get_attr("#link", "href").await?;
+    /// ```
+    pub async fn get_attr(&self, selector: &str, attr: &str) -> Result<Option<String>> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("get_attr requires Chromium mode".into()))?
+            .get_attr(selector, attr)
+            .await
+    }
+
+    /// Wait until the current URL contains `expected_url` (Chromium only).
+    ///
+    /// ```ignore
+    /// page.click_ele("#login").await?;
+    /// page.wait_for_navigation("/dashboard", Duration::from_secs(10)).await?;
+    /// ```
+    pub async fn wait_for_navigation(
+        &self,
+        expected_url: &str,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_for_navigation requires Chromium mode".into()))?
+            .wait_for_navigation(expected_url, timeout)
+            .await
+    }
+
+    /// Scroll the page by a relative offset in pixels (Chromium only).
+    ///
+    /// ```ignore
+    /// page.scroll_by(0, 500).await?; // scroll down 500px
+    /// ```
+    pub async fn scroll_by(&self, x: i64, y: i64) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("scroll_by requires Chromium mode".into()))?
+            .scroll_by(x, y)
+            .await
+    }
+
+    /// Type text character-by-character to simulate realistic keyboard input (Chromium only).
+    ///
+    /// ```ignore
+    /// page.keys("hello").await?;
+    /// ```
+    pub async fn keys(&self, text: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("keys requires Chromium mode".into()))?
+            .keys(text)
+            .await
+    }
+
     // ── Load strategy ────────────────────────────────────────
 
     /// Set the page load strategy (Chromium only).

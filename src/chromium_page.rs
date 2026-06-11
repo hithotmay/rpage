@@ -26,6 +26,12 @@ use crate::error::{Error, Result};
 use crate::locator::locator_to_selector;
 use crate::websocket::WebSocketMonitor;
 
+/// Safely JSON-escape a string for embedding in JavaScript.
+/// Falls back to a quoted string on serialization failure (should never happen for valid UTF-8).
+fn json_escape(s: impl AsRef<str>) -> String {
+    serde_json::to_string(s.as_ref()).unwrap_or_else(|_| format!("\"{}\"", s.as_ref()))
+}
+
 /// Options for PDF export via CDP `Page.printToPDF`.
 ///
 /// All dimension fields use **inches**. Unset fields use the browser's default
@@ -1027,10 +1033,10 @@ impl ChromiumPage {
             ));
         }
 
-        let host_sel = serde_json::to_string(parts[0]).unwrap();
+        let host_sel = json_escape(parts[0]);
         let inner_sels: Vec<String> = parts[1..]
             .iter()
-            .map(|s| serde_json::to_string(s).unwrap())
+            .map(json_escape)
             .collect();
 
         // Build recursive JS for shadow DOM piercing
@@ -1071,10 +1077,10 @@ impl ChromiumPage {
             ));
         }
 
-        let host_sel = serde_json::to_string(parts[0]).unwrap();
+        let host_sel = json_escape(parts[0]);
         let inner_sels: Vec<String> = parts[1..]
             .iter()
-            .map(|s| serde_json::to_string(s).unwrap())
+            .map(json_escape)
             .collect();
 
         let query_js = build_shadow_query_all_js(&host_sel, &inner_sels);
@@ -1828,7 +1834,7 @@ impl ChromiumPage {
     pub async fn frame_html(&self, selector: &str) -> Result<String> {
         let js = format!(
             "document.querySelector({sel}).contentDocument.documentElement.outerHTML",
-            sel = serde_json::to_string(selector).unwrap()
+            sel = json_escape(selector)
         );
         self.page
             .evaluate(js.as_str())
@@ -1844,7 +1850,7 @@ impl ChromiumPage {
     pub async fn frame_execute(&self, selector: &str, js_code: &str) -> Result<serde_json::Value> {
         let js = format!(
             "(function(){{ var f = document.querySelector({sel}); if(!f) return null; return (function(){{ {code} }}).call(f.contentWindow); }})()",
-            sel = serde_json::to_string(selector).unwrap(),
+            sel = json_escape(selector),
             code = js_code
         );
         let r = self
@@ -2072,6 +2078,168 @@ impl ChromiumPage {
         Ok(())
     }
 
+    // ── DrissionPage-style convenience API ──────────────────
+
+    /// Navigate to a URL and return `&self` for chaining.
+    ///
+    /// This is a chainable alias for [`get()`](Self::get):
+    ///
+    /// ```ignore
+    /// page.goto("https://example.com")
+    ///     .await?
+    ///     .click_ele("#btn")
+    ///     .await?;
+    /// ```
+    pub async fn goto(&self, url: &str) -> Result<&Self> {
+        self.get(url).await?;
+        Ok(self)
+    }
+
+    /// Type text into the first element matching `selector` (wait + fill).
+    ///
+    /// Waits up to the default timeout for the element to appear, then fills
+    /// it with the provided text. Returns `&self` for chaining.
+    ///
+    /// ```ignore
+    /// page.type_text("#search", "hello world").await?.click_ele("#go").await?;
+    /// ```
+    pub async fn type_text(&self, selector: &str, text: &str) -> Result<&Self> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        ele.fill(text).await?;
+        Ok(self)
+    }
+
+    /// Click the first element matching `selector` (wait + click).
+    ///
+    /// Waits up to the default timeout for the element to appear, then clicks
+    /// it. Returns `&self` for chaining.
+    ///
+    /// ```ignore
+    /// page.click_ele("#submit").await?;
+    /// ```
+    pub async fn click_ele(&self, selector: &str) -> Result<&Self> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        ele.click().await?;
+        Ok(self)
+    }
+
+    /// Get the visible text of the first element matching `selector`.
+    ///
+    /// Waits for the element, then returns its text content in one step.
+    ///
+    /// ```ignore
+    /// let label = page.get_text("#result").await?;
+    /// ```
+    pub async fn get_text(&self, selector: &str) -> Result<String> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        Ok(ele.text().to_string())
+    }
+
+    /// Get an attribute value from the first element matching `selector`.
+    ///
+    /// Waits for the element, then returns the requested attribute.
+    /// Returns `Ok(None)` if the attribute does not exist.
+    ///
+    /// ```ignore
+    /// let href = page.get_attr("#link", "href").await?;
+    /// ```
+    pub async fn get_attr(&self, selector: &str, attr: &str) -> Result<Option<String>> {
+        let timeout_secs = self.opts.timeout.as_secs();
+        let ele = self.wait_ele(selector, timeout_secs).await?;
+        Ok(ele.attr(attr).map(String::from))
+    }
+
+    /// Wait until the current URL contains `expected_url`.
+    ///
+    /// Polls the page URL every 200 ms until it contains the expected
+    /// substring or the timeout elapses.
+    ///
+    /// ```ignore
+    /// page.click_ele("#login").await?;
+    /// page.wait_for_navigation("/dashboard", Duration::from_secs(10)).await?;
+    /// ```
+    pub async fn wait_for_navigation(
+        &self,
+        expected_url: &str,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let current = self.url().await?;
+            if current.contains(expected_url) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Browser(format!(
+                    "wait_for_navigation: URL still '{}' after {}s (expected '{}')",
+                    current,
+                    timeout.as_secs(),
+                    expected_url
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Scroll the page by a relative offset (pixels).
+    ///
+    /// Positive `y` scrolls down, negative scrolls up.
+    /// Positive `x` scrolls right, negative scrolls left.
+    ///
+    /// ```ignore
+    /// page.scroll_by(0, 500).await?; // scroll down 500px
+    /// ```
+    pub async fn scroll_by(&self, x: i64, y: i64) -> Result<()> {
+        self.page
+            .evaluate(format!("window.scrollBy({x}, {y})"))
+            .await
+            .map_err(|e| Error::Browser(format!("scroll_by: {e}")))?;
+        Ok(())
+    }
+
+    /// Type text character-by-character to simulate realistic keyboard input.
+    ///
+    /// Sends a `keyDown` + `keyUp` pair for each character via CDP
+    /// `Input.dispatchKeyEvent`, with a 50 ms delay between keystrokes.
+    ///
+    /// ```ignore
+    /// page.keys("hello").await?;
+    /// ```
+    pub async fn keys(&self, text: &str) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        for ch in text.chars() {
+            let key_str = ch.to_string();
+            let down = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyDown)
+                .key(&key_str)
+                .text(&key_str)
+                .build()
+                .map_err(|e| Error::Browser(format!("keys down build: {e}")))?;
+            self.page
+                .execute(down)
+                .await
+                .map_err(|e| Error::Browser(format!("keys down: {e}")))?;
+
+            let up = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyUp)
+                .key(&key_str)
+                .build()
+                .map_err(|e| Error::Browser(format!("keys up build: {e}")))?;
+            self.page
+                .execute(up)
+                .await
+                .map_err(|e| Error::Browser(format!("keys up: {e}")))?;
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Ok(())
+    }
+
     // ── Permissions (f27) ────────────────────────────────────
 
     /// Grant browser permissions for the given origin.
@@ -2243,7 +2411,7 @@ impl ChromiumPage {
 
     /// Enter an iframe by CSS selector, returning a FrameContext for operations inside it.
     pub async fn enter_frame(&self, selector: &str) -> Result<FrameContext> {
-        let escaped = serde_json::to_string(selector).unwrap();
+        let escaped = json_escape(selector);
         let js = format!(
             "(function(){{ var f = document.querySelector({sel}); if(!f) return null; return f.contentWindow ? 'same-origin' : 'cross-origin'; }})()",
             sel = escaped
@@ -2526,8 +2694,8 @@ impl ChromiumPage {
                 style.textContent = {css_json};
                 document.head.appendChild(style);
             }})()"#,
-            id_json = serde_json::to_string(&id).unwrap(),
-            css_json = serde_json::to_string(css).unwrap(),
+            id_json = json_escape(&id),
+            css_json = json_escape(css),
         );
         self.execute(&js).await?;
         Ok(id)
@@ -2540,7 +2708,7 @@ impl ChromiumPage {
                 var el = document.getElementById({id_json});
                 if (el) el.remove();
             }})()"#,
-            id_json = serde_json::to_string(id).unwrap(),
+            id_json = json_escape(id),
         );
         self.execute(&js).await?;
         Ok(())
@@ -2876,7 +3044,7 @@ pub struct FrameContext {
 impl FrameContext {
     /// Execute JavaScript inside this iframe (same-origin only).
     pub async fn execute(&self, js_code: &str) -> Result<serde_json::Value> {
-        let escaped = serde_json::to_string(&self.selector).unwrap();
+        let escaped = json_escape(&self.selector);
         let js = if self.origin_type == "same-origin" {
             format!(
                 "(function(){{ var f = document.querySelector({sel}); if(!f||!f.contentDocument) return null; return (function(){{ {code} }}).call(f.contentWindow, f.contentDocument); }})()",
@@ -2905,8 +3073,8 @@ impl FrameContext {
         }
         let locator = crate::locator::parse_locator(locator_str)?;
         let selector = locator_to_selector(&locator)?;
-        let escaped_frame = serde_json::to_string(&self.selector).unwrap();
-        let escaped_inner = serde_json::to_string(&selector).unwrap();
+        let escaped_frame = json_escape(&self.selector);
+        let escaped_inner = json_escape(&selector);
         let js = format!(
             "(function(){{ var f = document.querySelector({frame}); if(!f||!f.contentDocument) return null; return f.contentDocument.querySelector({inner})?.outerHTML || null; }})()",
             frame = escaped_frame,
@@ -2942,7 +3110,7 @@ impl FrameContext {
 
     /// Get the iframe's HTML content.
     pub async fn html(&self) -> Result<String> {
-        let escaped = serde_json::to_string(&self.selector).unwrap();
+        let escaped = json_escape(&self.selector);
         let js = format!(
             "document.querySelector({sel})?.contentDocument?.documentElement?.outerHTML || ''",
             sel = escaped

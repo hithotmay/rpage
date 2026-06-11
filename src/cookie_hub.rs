@@ -189,3 +189,97 @@ impl Default for CookieHub {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cookie_hub_new() {
+        let hub = CookieHub::new();
+        // CookieHub should be constructable without error
+        let _ = &hub;
+    }
+
+    #[test]
+    fn test_cookie_hub_default() {
+        let hub = CookieHub::default();
+        let _ = &hub;
+    }
+
+    #[test]
+    fn test_cookie_hub_clear_empty() {
+        let hub = CookieHub::new();
+        let result = hub.clear();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cookie_hub_cookie_header_empty() {
+        let hub = CookieHub::new();
+        let result = hub.cookie_header("https://example.com");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_cookie_hub_get_cookies_empty() {
+        let hub = CookieHub::new();
+        let result = hub.get_cookies("https://example.com");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cookie_hub_set_cookie_raw() {
+        let hub = CookieHub::new();
+        let result = hub.set_cookie_raw("session=abc123", "https://example.com");
+        assert!(result.is_ok());
+
+        let cookies = hub.get_cookies("https://example.com").unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name(), "session");
+        assert_eq!(cookies[0].value(), "abc123");
+    }
+
+    #[test]
+    fn test_cookie_hub_cookie_header_after_set() {
+        let hub = CookieHub::new();
+        hub.set_cookie_raw("token=xyz", "https://example.com").unwrap();
+        let header = hub.cookie_header("https://example.com").unwrap();
+        assert_eq!(header, "token=xyz");
+    }
+
+    #[test]
+    fn test_cookie_hub_clear_removes_cookies() {
+        let hub = CookieHub::new();
+        hub.set_cookie_raw("foo=bar", "https://example.com").unwrap();
+        assert!(!hub.get_cookies("https://example.com").unwrap().is_empty());
+
+        hub.clear().unwrap();
+        assert!(hub.get_cookies("https://example.com").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cookie_hub_debug() {
+        let hub = CookieHub::new();
+        let debug_str = format!("{:?}", hub);
+        assert!(debug_str.contains("CookieHub"));
+    }
+
+    #[test]
+    fn test_cookie_hub_invalid_url() {
+        let hub = CookieHub::new();
+        let result = hub.get_cookies("not-a-valid-url");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cookie_hub_store_is_clonable() {
+        let hub = CookieHub::new();
+        let store1 = hub.store();
+        let store2 = hub.store();
+        // Both are Arc clones pointing to the same store
+        let _ = (store1, store2);
+    }
+}

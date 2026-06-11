@@ -278,3 +278,110 @@ impl WebPageOptionsBuilder {
         self.opts
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chromium_options_default_values() {
+        let opts = ChromiumOptions::default();
+        assert_eq!(opts.timeout, Duration::from_secs(10));
+        assert!(opts.user_agent.is_empty());
+        assert!(opts.headless);
+        assert!(opts.proxy.is_none());
+        assert!(opts.proxy_auth.is_none());
+        assert!(opts.browser_path.is_none());
+        assert!(opts.user_data_dir.is_none());
+        assert!(opts.extension_dirs.is_empty());
+        assert!(opts.disable_gpu);
+        assert!(!opts.no_sandbox);
+        assert!(opts.extra_args.is_empty());
+        assert_eq!(opts.debug_port, 9222);
+    }
+
+    #[test]
+    fn test_chromium_options_default_viewport() {
+        let opts = ChromiumOptions::default();
+        assert_eq!(opts.viewport.width, 1920);
+        assert_eq!(opts.viewport.height, 1080);
+    }
+
+    #[test]
+    fn test_viewport_default() {
+        let vp = Viewport::default();
+        assert_eq!(vp.width, 1920);
+        assert_eq!(vp.height, 1080);
+    }
+
+    #[test]
+    fn test_session_options_default_values() {
+        let opts = SessionOptions::default();
+        assert_eq!(opts.timeout, Duration::from_secs(10));
+        assert!(opts.user_agent.contains("Chrome"));
+        assert!(opts.proxy.is_none());
+        assert!(!opts.accept_invalid_certs);
+        assert!(opts.follow_redirects);
+        assert_eq!(opts.max_redirects, 10);
+    }
+
+    #[test]
+    fn test_chromium_options_builder_custom() {
+        let opts = ChromiumOptions::builder()
+            .timeout(Duration::from_secs(30))
+            .headless(false)
+            .no_sandbox(true)
+            .disable_gpu(false)
+            .proxy("http://127.0.0.1:7890")
+            .proxy_auth("user", "pass")
+            .browser_path("/usr/bin/chromium")
+            .user_data_dir("/tmp/profile")
+            .extension_dir("/path/to/ext")
+            .arg("--disable-extensions")
+            .build();
+        assert_eq!(opts.timeout, Duration::from_secs(30));
+        assert!(!opts.headless);
+        assert!(opts.no_sandbox);
+        assert!(!opts.disable_gpu);
+        assert_eq!(opts.proxy.as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(
+            opts.proxy_auth.as_ref(),
+            Some(&(String::from("user"), String::from("pass")))
+        );
+        assert_eq!(
+            opts.browser_path.as_deref(),
+            Some(std::path::Path::new("/usr/bin/chromium"))
+        );
+        assert_eq!(opts.extension_dirs.len(), 1);
+        assert_eq!(opts.extra_args.len(), 1);
+        assert_eq!(opts.extra_args[0], "--disable-extensions");
+    }
+
+    #[test]
+    fn test_session_options_builder_custom() {
+        let opts = SessionOptions::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent("CustomAgent/1.0")
+            .proxy("socks5://localhost:9050")
+            .accept_invalid_certs(true)
+            .build();
+        assert_eq!(opts.timeout, Duration::from_secs(60));
+        assert_eq!(opts.user_agent, "CustomAgent/1.0");
+        assert_eq!(opts.proxy.as_deref(), Some("socks5://localhost:9050"));
+        assert!(opts.accept_invalid_certs);
+    }
+
+    #[test]
+    fn test_web_page_options_default() {
+        let opts = WebPageOptions::default();
+        assert_eq!(opts.initial_mode, crate::web_page::PageMode::Chromium);
+    }
+
+    #[test]
+    fn test_web_page_options_builder_session_mode() {
+        let opts = WebPageOptions::builder()
+            .initial_mode(crate::web_page::PageMode::Session)
+            .build();
+        assert_eq!(opts.initial_mode, crate::web_page::PageMode::Session);
+    }
+}

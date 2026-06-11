@@ -12,6 +12,11 @@ use crate::error::{Error, Result};
 use crate::locator::{locator_to_selector, parse_locator, Locator};
 use crate::wait::WaitOptions;
 
+/// Safely JSON-escape a string for embedding in JavaScript.
+fn json_escape(s: impl AsRef<str>) -> String {
+    serde_json::to_string(s.as_ref()).unwrap_or_else(|_| format!("\"{}\"", s.as_ref()))
+}
+
 // ── Page identity ────────────────────────────────────────────
 
 /// Identifies which backing store an element comes from.
@@ -275,7 +280,7 @@ impl Element {
     pub async fn fill(&self, text: &str) -> Result<()> {
         // Use JS directly — most reliable, works with all characters including Chinese.
         // Use the element's own prototype chain so it works for both input and textarea.
-        let escaped = serde_json::to_string(text).unwrap();
+        let escaped = json_escape(text);
         let js = format!(
             "(function() {{ \
                this.focus(); \
@@ -431,7 +436,7 @@ impl Element {
                 use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
                 let function_decl = format!(
                     "function() {{ return getComputedStyle(this).getPropertyValue({}); }}",
-                    serde_json::to_string(property).unwrap()
+                    json_escape(property)
                 );
                 let params = CallFunctionOnParams::builder()
                     .object_id(oid.clone())
@@ -459,7 +464,7 @@ impl Element {
 
     /// Select an option in a `<select>` element by visible text.
     pub async fn select(&self, text: &str) -> Result<()> {
-        let escaped = serde_json::to_string(text).unwrap();
+        let escaped = json_escape(text);
         let js = format!(
             "(function() {{ \
                var opts = this.options; \
@@ -479,7 +484,7 @@ impl Element {
 
     /// Select an option by its value attribute.
     pub async fn select_by_value(&self, value: &str) -> Result<()> {
-        let escaped = serde_json::to_string(value).unwrap();
+        let escaped = json_escape(value);
         let js = format!(
             "(function() {{ \
                var opts = this.options; \
@@ -831,7 +836,7 @@ impl Element {
 
     /// Select an `<option>` element or select by value/text in a `<select>`.
     pub async fn select_option(&self, value: &str) -> Result<()> {
-        let escaped = serde_json::to_string(value).unwrap();
+        let escaped = json_escape(value);
         let js = format!(
             "(function() {{ \
                if (this.tagName === 'OPTION') {{ \
@@ -968,8 +973,8 @@ impl Element {
 
     /// Set an attribute on this element.
     pub async fn set_attr(&self, name: &str, value: &str) -> Result<()> {
-        let escaped_name = serde_json::to_string(name).unwrap();
-        let escaped_value = serde_json::to_string(value).unwrap();
+        let escaped_name = json_escape(name);
+        let escaped_value = json_escape(value);
         let js = format!("this.setAttribute({}, {})", escaped_name, escaped_value);
         self.js(&js).await
     }
@@ -1074,7 +1079,7 @@ impl Element {
             let selector = locator_to_selector(locator)?;
             format!(
                 "(function(){{ var el = document.querySelector({}); if(!el) return; (function(){{ {} }}).call(el); }})()",
-                serde_json::to_string(&selector).unwrap(),
+                json_escape(&selector),
                 script,
             )
         } else {
@@ -1084,7 +1089,7 @@ impl Element {
                 .ok_or_else(|| Error::InvalidLocator("cannot convert to XPath".into()))?;
             format!(
                 "(function(){{ var result = document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); var el = result.singleNodeValue; if(!el) return; (function(){{ {} }}).call(el); }})()",
-                serde_json::to_string(&xpath).unwrap(),
+                json_escape(&xpath),
                 script,
             )
         };
@@ -1206,7 +1211,7 @@ impl Element {
         }
 
         // Build JS: start from this.shadowRoot, then drill down
-        let first_sel = serde_json::to_string(parts[0]).unwrap();
+        let first_sel = json_escape(parts[0]);
         let js = if parts.len() == 1 {
             format!(
                 "function() {{ \
@@ -1222,7 +1227,7 @@ impl Element {
             );
             let inner_sels: Vec<String> = parts
                 .iter()
-                .map(|s| serde_json::to_string(s).unwrap())
+                .map(json_escape)
                 .collect();
             for (i, sel) in inner_sels.iter().enumerate() {
                 if i < inner_sels.len() - 1 {
@@ -1338,7 +1343,7 @@ impl Element {
         // Build JS for querySelectorAll
         let inner_sels: Vec<String> = parts
             .iter()
-            .map(|s| serde_json::to_string(s).unwrap())
+            .map(json_escape)
             .collect();
 
         let query_body = if inner_sels.len() == 1 {
@@ -1953,5 +1958,263 @@ impl ElementBatch for [Element] {
     }
     fn displayed(&self) -> Vec<&Element> {
         self.iter().filter(|e| e.is_displayed()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_session_basic() {
+        let el = Element::new_session(
+            None,
+            "<button class=\"btn\">Click me</button>".to_string(),
+            "button".to_string(),
+            "Click me".to_string(),
+            vec![("class".to_string(), "btn".to_string())],
+        );
+        assert_eq!(el.tag(), "button");
+        assert_eq!(el.text(), "Click me");
+        assert_eq!(el.html(), "<button class=\"btn\">Click me</button>");
+        assert_eq!(el.attr("class"), Some("btn"));
+        assert!(matches!(el.page_ref(), PageRef::Session));
+        assert!(!el.is_cdp());
+    }
+
+    #[test]
+    fn test_new_session_no_locator() {
+        let el = Element::new_session(
+            None,
+            "<div></div>".to_string(),
+            "div".to_string(),
+            String::new(),
+            vec![],
+        );
+        assert!(el.locator().is_none());
+    }
+
+    #[test]
+    fn test_new_session_with_locator() {
+        let loc = Locator::Css("#test".to_string());
+        let el = Element::new_session(
+            Some(loc),
+            "<div id=\"test\"></div>".to_string(),
+            "div".to_string(),
+            String::new(),
+            vec![("id".to_string(), "test".to_string())],
+        );
+        assert!(el.locator().is_some());
+        assert_eq!(el.locator().unwrap(), &Locator::Css("#test".to_string()));
+    }
+
+    #[test]
+    fn test_tag_accessor() {
+        let el = Element::new_session(
+            None,
+            "<input type=\"text\" />".to_string(),
+            "input".to_string(),
+            String::new(),
+            vec![("type".to_string(), "text".to_string())],
+        );
+        assert_eq!(el.tag(), "input");
+    }
+
+    #[test]
+    fn test_text_accessor() {
+        let el = Element::new_session(
+            None,
+            "<span>Hello World</span>".to_string(),
+            "span".to_string(),
+            "Hello World".to_string(),
+            vec![],
+        );
+        assert_eq!(el.text(), "Hello World");
+    }
+
+    #[test]
+    fn test_html_accessor() {
+        let html = "<div class=\"outer\"><span>inner</span></div>";
+        let el = Element::new_session(
+            None,
+            html.to_string(),
+            "div".to_string(),
+            "inner".to_string(),
+            vec![("class".to_string(), "outer".to_string())],
+        );
+        assert_eq!(el.html(), html);
+    }
+
+    #[test]
+    fn test_attr_existing() {
+        let el = Element::new_session(
+            None,
+            "<a href=\"/login\" class=\"link\">Login</a>".to_string(),
+            "a".to_string(),
+            "Login".to_string(),
+            vec![
+                ("href".to_string(), "/login".to_string()),
+                ("class".to_string(), "link".to_string()),
+            ],
+        );
+        assert_eq!(el.attr("href"), Some("/login"));
+        assert_eq!(el.attr("class"), Some("link"));
+    }
+
+    #[test]
+    fn test_attr_missing() {
+        let el = Element::new_session(
+            None,
+            "<div></div>".to_string(),
+            "div".to_string(),
+            String::new(),
+            vec![],
+        );
+        assert_eq!(el.attr("id"), None);
+    }
+
+    #[test]
+    fn test_attr_case_insensitive() {
+        let el = Element::new_session(
+            None,
+            "<div Class=\"upper\"></div>".to_string(),
+            "div".to_string(),
+            String::new(),
+            vec![("Class".to_string(), "upper".to_string())],
+        );
+        assert_eq!(el.attr("class"), Some("upper"));
+        assert_eq!(el.attr("CLASS"), Some("upper"));
+    }
+
+    #[test]
+    fn test_attrs_all() {
+        let el = Element::new_session(
+            None,
+            "<input type=\"text\" name=\"q\" />".to_string(),
+            "input".to_string(),
+            String::new(),
+            vec![
+                ("type".to_string(), "text".to_string()),
+                ("name".to_string(), "q".to_string()),
+            ],
+        );
+        let attrs = el.attrs();
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].0, "type");
+        assert_eq!(attrs[1].0, "name");
+    }
+
+    #[test]
+    fn test_page_ref_session() {
+        let el = Element::new_session(
+            None,
+            "<p></p>".to_string(),
+            "p".to_string(),
+            String::new(),
+            vec![],
+        );
+        assert!(matches!(el.page_ref(), PageRef::Session));
+    }
+
+    #[test]
+    fn test_is_cdp_session_element() {
+        let el = Element::new_session(
+            None,
+            "<div></div>".to_string(),
+            "div".to_string(),
+            String::new(),
+            vec![],
+        );
+        assert!(!el.is_cdp());
+    }
+
+    #[test]
+    fn test_is_enabled_no_disabled() {
+        let el = Element::new_session(
+            None,
+            "<button>Click</button>".to_string(),
+            "button".to_string(),
+            "Click".to_string(),
+            vec![],
+        );
+        assert!(el.is_enabled());
+    }
+
+    #[test]
+    fn test_is_enabled_with_disabled() {
+        let el = Element::new_session(
+            None,
+            "<button disabled>Click</button>".to_string(),
+            "button".to_string(),
+            "Click".to_string(),
+            vec![("disabled".to_string(), String::new())],
+        );
+        assert!(!el.is_enabled());
+    }
+
+    #[test]
+    fn test_is_displayed_normal() {
+        let el = Element::new_session(
+            None,
+            "<div>Hello</div>".to_string(),
+            "div".to_string(),
+            "Hello".to_string(),
+            vec![],
+        );
+        assert!(el.is_displayed());
+    }
+
+    #[test]
+    fn test_is_displayed_empty_html() {
+        let el = Element::new_session(
+            None,
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        );
+        assert!(!el.is_displayed());
+    }
+
+    #[test]
+    fn test_is_displayed_hidden() {
+        let el = Element::new_session(
+            None,
+            "<div style=\"display:none\">Hidden</div>".to_string(),
+            "div".to_string(),
+            "Hidden".to_string(),
+            vec![],
+        );
+        assert!(!el.is_displayed());
+    }
+
+    #[test]
+    fn test_batch_texts() {
+        let elements: Vec<Element> = vec![
+            Element::new_session(None, "<p>a</p>".into(), "p".into(), "a".into(), vec![]),
+            Element::new_session(None, "<p>b</p>".into(), "p".into(), "b".into(), vec![]),
+        ];
+        assert_eq!(elements.texts(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_batch_attr_values() {
+        let elements: Vec<Element> = vec![
+            Element::new_session(
+                None,
+                "<a href=\"/a\">a</a>".into(),
+                "a".into(),
+                "a".into(),
+                vec![("href".into(), "/a".into())],
+            ),
+            Element::new_session(
+                None,
+                "<a>no href</a>".into(),
+                "a".into(),
+                "no href".into(),
+                vec![],
+            ),
+        ];
+        assert_eq!(elements.attr_values("href"), vec![Some("/a"), None]);
     }
 }

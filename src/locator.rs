@@ -403,4 +403,270 @@ mod tests {
             _ => panic!("expected Chain"),
         }
     }
+
+    // ── Additional comprehensive tests ──────────────────────//
+
+    #[test]
+    fn test_css_div_child_p() {
+        let loc = parse_locator("css:div>p").unwrap();
+        assert_eq!(loc, Locator::Css("div>p".to_string()));
+        assert!(loc.is_css());
+    }
+
+    #[test]
+    fn test_css_combined_selector() {
+        let loc = parse_locator("css:#main .content > p:first-child").unwrap();
+        assert_eq!(loc, Locator::Css("#main .content > p:first-child".to_string()));
+    }
+
+    #[test]
+    fn test_css_bracket_selector() {
+        let loc = parse_locator("[data-testid='submit']").unwrap();
+        assert_eq!(loc, Locator::Css("[data-testid='submit']".to_string()));
+    }
+
+    #[test]
+    fn test_xpath_div() {
+        let loc = parse_locator("xpath://div").unwrap();
+        assert_eq!(loc, Locator::XPath("//div".to_string()));
+        assert!(loc.is_xpath());
+        assert!(!loc.is_css());
+    }
+
+    #[test]
+    fn test_text_equals_chinese() {
+        let loc = parse_locator("text=登录").unwrap();
+        assert_eq!(loc, Locator::Text("登录".to_string()));
+        assert!(loc.is_xpath());
+    }
+
+    #[test]
+    fn test_text_contains_chinese() {
+        let loc = parse_locator("text*=登录").unwrap();
+        assert_eq!(loc, Locator::TextContains("登录".to_string()));
+    }
+
+    #[test]
+    fn test_attr_equals_class_btn() {
+        let loc = parse_locator("@class=btn").unwrap();
+        assert_eq!(
+            loc,
+            Locator::AttrEquals {
+                attr: "class".to_string(),
+                value: "btn".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_attr_contains_class_btn() {
+        let loc = parse_locator("@class*=btn").unwrap();
+        assert_eq!(
+            loc,
+            Locator::AttrContains {
+                attr: "class".to_string(),
+                value: "btn".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_prefix() {
+        let loc = parse_locator("tag:form").unwrap();
+        assert_eq!(loc, Locator::Css("form".to_string()));
+    }
+
+    #[test]
+    fn test_chain_tag_text_chinese() {
+        let loc = parse_locator("tag:form@@text=登录").unwrap();
+        match loc {
+            Locator::Chain(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Locator::Css("form".to_string()));
+                assert_eq!(parts[1], Locator::Text("登录".to_string()));
+            }
+            _ => panic!("expected Chain"),
+        }
+    }
+
+    #[test]
+    fn test_chain_with_attr() {
+        let loc = parse_locator("tag:input@@@name=login").unwrap();
+        match loc {
+            Locator::Chain(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Locator::Css("input".to_string()));
+                // The second part "name=login" has no @ prefix, so it's treated as CSS
+                assert_eq!(parts[1], Locator::Css("name=login".to_string()));
+            }
+            _ => panic!("expected Chain"),
+        }
+    }
+
+    #[test]
+    fn test_chain_with_at_attr() {
+        // Use @@ (not @@@) so that the @ prefix is preserved
+        let loc = parse_locator("tag:div@@@name=user").unwrap();
+        match loc {
+            Locator::Chain(parts) => {
+                assert_eq!(parts.len(), 2);
+                // "name=user" without @ is parsed as CSS
+                assert_eq!(parts[1], Locator::Css("name=user".to_string()));
+            }
+            _ => panic!("expected Chain"),
+        }
+    }
+
+    #[test]
+    fn test_chain_double_at_with_attr() {
+        let loc = parse_locator("tag:div@@name=user").unwrap();
+        // "name=user" without @ prefix is parsed as plain CSS
+        match loc {
+            Locator::Chain(parts) => {
+                assert_eq!(parts.len(), 2);
+            }
+            _ => panic!("expected Chain"),
+        }
+    }
+
+    #[test]
+    fn test_empty_locator_error() {
+        let result = parse_locator("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_whitespace_only_locator_error() {
+        let result = parse_locator("   ");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_xpath_empty_error() {
+        let result = parse_locator("xpath:");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_css_empty_error() {
+        let result = parse_locator("css:");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_text_empty_error() {
+        let result = parse_locator("text=");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_to_css_returns_some_for_css() {
+        let loc = Locator::Css("#id".to_string());
+        assert_eq!(loc.to_css(), Some("#id".to_string()));
+    }
+
+    #[test]
+    fn test_to_css_returns_none_for_xpath() {
+        let loc = Locator::XPath("//div".to_string());
+        assert!(loc.to_css().is_none());
+    }
+
+    #[test]
+    fn test_to_css_returns_none_for_text() {
+        let loc = Locator::Text("hello".to_string());
+        assert!(loc.to_css().is_none());
+    }
+
+    #[test]
+    fn test_to_xpath_css_id() {
+        let loc = Locator::Css("#myid".to_string());
+        assert_eq!(loc.to_xpath(), Some("//*[@id='myid']".to_string()));
+    }
+
+    #[test]
+    fn test_to_xpath_css_class() {
+        let loc = Locator::Css(".myclass".to_string());
+        let xp = loc.to_xpath().unwrap();
+        assert!(xp.contains("contains") && xp.contains("@class"));
+    }
+
+    #[test]
+    fn test_to_xpath_text() {
+        let loc = Locator::Text("hello".to_string());
+        assert_eq!(loc.to_xpath(), Some("//*[text()='hello']".to_string()));
+    }
+
+    #[test]
+    fn test_to_xpath_text_contains() {
+        let loc = Locator::TextContains("hello".to_string());
+        assert_eq!(
+            loc.to_xpath(),
+            Some("//*[contains(text(),'hello')]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_xpath_attr_equals() {
+        let loc = Locator::AttrEquals {
+            attr: "class".to_string(),
+            value: "btn".to_string(),
+        };
+        assert_eq!(loc.to_xpath(), Some("//*[@class='btn']".to_string()));
+    }
+
+    #[test]
+    fn test_to_xpath_attr_contains() {
+        let loc = Locator::AttrContains {
+            attr: "class".to_string(),
+            value: "btn".to_string(),
+        };
+        assert_eq!(
+            loc.to_xpath(),
+            Some("//*[contains(@class,'btn')]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_locator_to_selector_css() {
+        let loc = Locator::Css("div > p".to_string());
+        assert_eq!(locator_to_selector(&loc).unwrap(), "div > p");
+    }
+
+    #[test]
+    fn test_locator_to_selector_xpath() {
+        let loc = Locator::XPath("//div".to_string());
+        assert_eq!(locator_to_selector(&loc).unwrap(), "xpath://div");
+    }
+
+    #[test]
+    fn test_locator_to_selector_text() {
+        let loc = Locator::Text("Login".to_string());
+        assert_eq!(
+            locator_to_selector(&loc).unwrap(),
+            "xpath://*[text()='Login']"
+        );
+    }
+
+    #[test]
+    fn test_into_locator_str() {
+        use super::IntoLocator;
+        let loc = "#test".to_locator().unwrap();
+        assert_eq!(loc, Locator::Css("#test".to_string()));
+    }
+
+    #[test]
+    fn test_into_locator_string() {
+        use super::IntoLocator;
+        let s = String::from(".cls");
+        let loc = s.to_locator().unwrap();
+        assert_eq!(loc, Locator::Css(".cls".to_string()));
+    }
+
+    #[test]
+    fn test_into_locator_locator() {
+        use super::IntoLocator;
+        let original = Locator::XPath("//div".to_string());
+        let cloned = original.to_locator().unwrap();
+        assert_eq!(original, cloned);
+    }
 }
