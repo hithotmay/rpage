@@ -1,6 +1,6 @@
 # rpage 🦀🌐
 
-> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**523 个公开方法，10,724 行 Rust**。
+> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**568 个公开方法，11,599 行 Rust**。
 
 `rpage` 是一个受 [DrissionPage](https://github.com/g1879/DrissionPage) 启发的 Rust 浏览器自动化库。
 
@@ -16,7 +16,12 @@
 - **链式调用** — `page.goto(url).await?.type_text("#kw", "rust").await?` 一行完成导航+输入
 - **一步到位 API** — `click_ele()`/`get_text()`/`get_attr()` 无需先 `ele()` 再操作
 - **网络包实时监听** — `on_request()`/`on_response()` 回调式捕获每个请求和响应
-- **标签页管理** — 创建/切换/关闭/列表
+- **网络监听模式** — listen_start/stop + continue_request/fail_request 请求级控制
+- **设备模拟** — 设备像素比/触摸模式/地理位置+刷新
+- **资源分析** — links/images/ele_count 一键提取页面资源
+- **网络控制** — URL 拦截/离线模式/清除缓存/禁用图片
+- **标签页增强** — tab_to_front/get_tab_by_title/get_tab_by_url/wait_new_tab
+- **Tab 管理** — 创建/切换/关闭/列表
 - **条件等待** — 等元素出现/消失/删除，等标题/URL 变化，等 JS 表达式
 - **Element 等待** — wait_for_visible/hidden/stale/clickable/enabled/text/attribute
 - **运行时修改** — headers/user_agent/viewport
@@ -73,7 +78,7 @@ page.goto("https://www.baidu.com").await?
 rpage = "0.1"
 ```
 
-## 📖 API 参考 (523 方法)
+## 📖 API 参考 (568 方法)
 
 ### 链式便捷 API (8)
 
@@ -161,7 +166,7 @@ page.wait_title_is("完成", 10).await?;
 page.wait_for_navigation(10).await?;
 ```
 
-### 标签页 (6)
+### 标签页 (10)
 
 ```rust
 page.new_tab().await?;
@@ -170,6 +175,12 @@ let urls = page.tab_urls().await?;
 page.switch_to_tab(1).await?;
 page.close_tab(0).await?;
 let tabs = page.tabs().await?;
+// ── iter10 增强 ──
+page.tab_to_front(0).await?;           // 将标签页置顶
+let idx = page.get_tab_by_title("百度").await?;  // 按标题查找
+let idx = page.get_tab_by_url("example").await?; // 按 URL 查找
+page.wait_new_tab(5).await?;           // 等待新标签页
+page.set_download_file_name("report.pdf").await?; // 设置下载文件名
 ```
 
 ### 元素操作 (55+ 方法)
@@ -485,6 +496,40 @@ page.listen_websocket().await?;
 let frames = page.websocket_frames();
 ```
 
+### 网络监听模式 (4) — iter10
+
+```rust
+page.listen_start().await?;                              // 开启网络监听
+// ... 用户操作 ...
+let reqs = page.network_monitor().requests();            // 获取捕获的请求
+page.listen_stop().await?;                               // 停止监听
+page.continue_request("req_id", None).await?;            // 继续请求
+page.continue_request("req_id", Some("https://new.url")).await?; // 重定向
+page.fail_request("req_id").await?;                      // 拒绝请求
+```
+
+### 设备模拟 + 网络控制 (9) — iter10
+
+```rust
+page.set_device_scale(2.0).await?;                       // 设置设备像素比
+page.set_touch(true).await?;                             // 开启触摸模式
+page.set_location_and_reload(39.9, 116.4).await?;       // 地理位置+刷新
+page.smooth_scroll(0, 1500, 500).await?;                 // 平滑滚动（x, y, ms）
+page.set_blocked_urls(&["*://*/*/*.css"]).await?;        // URL 拦截
+page.set_offline(true).await?;                           // 离线模式
+page.clear_cache().await?;                               // 清除缓存
+page.disable_images().await?;                            // 禁用所有图片
+page.get_and_wait(url, 10).await?;                       // 导航+等待标题
+```
+
+### 资源分析 (3) — iter10
+
+```rust
+let links = page.links().await?;                         // Vec<String> 所有链接
+let imgs = page.images().await?;                         // Vec<String> 所有图片
+let n = page.ele_count("a").await?;                      // 匹配元素数量
+```
+
 ### 模式切换 + 生命周期
 
 ```rust
@@ -529,25 +574,25 @@ page.options();           // Option<&ChromiumOptions>
 ## 项目结构
 
 ```
-rpage/  (10,724 行 Rust, 523 方法)
+rpage/  (11,599 行 Rust, 568 方法)
 ├── src/
-│   ├── chromium_page.rs  # CDP 浏览器控制 (170+ 方法)
+│   ├── chromium_page.rs  # CDP 浏览器控制 (190+ 方法)
 │   ├── element.rs        # 元素操作 (100+ 方法 + ElementBatch + Wait)
 │   ├── web_page.rs       # 统一双模式页 (120+ 方法)
 │   ├── session_page.rs   # HTTP 会话 (25+ 方法)
 │   ├── download.rs       # 下载管理 (13 方法)
-│   ├── network.rs        # 网络监控 + 实时监听 (16 方法)
+│   ├── network.rs        # 网络监控 + 实时监听 + 监听模式 (20 方法)
 │   ├── locator.rs        # 定位器解析 (6 方法)
 │   ├── config.rs         # 配置 (24 方法)
 │   ├── stealth.rs        # 反检测 (5 方法)
-│   ├── cookie_hub.rs     # Cookie 同步 + 文件 (10 方法)
+│   ├── cookie-hub.rs     # Cookie 同步 + 文件 (10 方法)
 │   ├── wait.rs           # 等待策略 (6 方法)
 │   ├── console.rs        # Console 捕获 (5 方法)
 │   ├── websocket.rs      # WebSocket 监听 (5 方法)
 │   ├── error.rs          # 错误类型
 │   ├── prelude.rs        # 预导入
 │   └── lib.rs            # 入口
-├── examples/             # 11 个示例
+├── examples/             # 12 个示例
 └── tests/                # 145 个测试
 ```
 
