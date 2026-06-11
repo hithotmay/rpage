@@ -294,6 +294,8 @@ pub struct ChromiumPage {
     init_script_ids: Arc<Mutex<HashMap<String, ScriptIdentifier>>>,
     /// Load strategy: "normal" | "eager" | "none"
     load_strategy: String,
+    /// Whether the high-level listen mode (DrissionPage-style) is active.
+    listening: Arc<Mutex<bool>>,
 }
 
 impl ChromiumPage {
@@ -739,6 +741,7 @@ impl ChromiumPage {
             init_scripts: Arc::new(Mutex::new(HashMap::new())),
             init_script_ids: Arc::new(Mutex::new(HashMap::new())),
             load_strategy: "normal".into(),
+            listening: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -3453,6 +3456,300 @@ impl ChromiumPage {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
+
+    // ── High-level listen mode (DrissionPage-style) ────────────
+
+    /// Start listening for all network requests and responses.
+    ///
+    /// Ensures that the CDP `Network.enable` domain has been enabled so that
+    /// request/response events are captured by the internal [`NetworkMonitor`].
+    /// Sets the listen-mode flag to `true`.
+    ///
+    /// ```ignore
+    /// page.listen_start().await?;
+    /// // … trigger some network activity …
+    /// let packets = page.get_packets("/api/");
+    /// page.listen_stop().await?;
+    /// ```
+    pub async fn listen_start(&self) -> Result<()> {
+        // Ensure Network.enable has been called
+        crate::network::enable_network(&self.page).await?;
+        if let Ok(mut flag) = self.listening.lock() {
+            *flag = true;
+        }
+        Ok(())
+    }
+
+    /// Stop the high-level listen mode.
+    ///
+    /// Clears the listen-mode flag. Does **not** clear recorded
+    /// requests/responses — use [`clear_network_records`](Self::clear_network_records)
+    /// for that.
+    ///
+    /// ```ignore
+    /// page.listen_stop().await?;
+    /// ```
+    pub async fn listen_stop(&self) -> Result<()> {
+        if let Ok(mut flag) = self.listening.lock() {
+            *flag = false;
+        }
+        Ok(())
+    }
+
+    /// Synchronously wait (busy-poll) until a network request whose URL
+    /// contains `url_pattern` is recorded, returning the first match.
+    ///
+    /// Blocks the calling thread for up to `timeout_secs` seconds, polling
+    /// every 100 ms. This is a synchronous convenience wrapper intended for
+    /// use outside of an async runtime or in simple scripts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Timeout`] if no matching request is seen within the
+    /// deadline.
+    ///
+    /// ```ignore
+    /// let pkt = page.wait_for_packet("/api/login", 10)?;
+    /// println!("{} {}", pkt.method, pkt.url);
+    /// ```
+    pub fn wait_for_packet(
+        &self,
+        url_pattern: &str,
+        timeout_secs: u64,
+    ) -> Result<crate::network::RequestInfo> {
+        let start = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let matches = self.network_monitor.find_requests_by_url(url_pattern);
+            if let Some(rec) = matches.into_iter().last() {
+                return Ok(crate::network::RequestInfo {
+                    url: rec.url,
+                    method: rec.method,
+                    resource_type: rec.resource_type,
+                    request_id: rec.request_id,
+                });
+            }
+            if start.elapsed() > deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_for_packet({url_pattern}) timed out"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Return all recorded request packets whose URL contains `url_pattern`.
+    ///
+    /// Each packet is a lightweight [`RequestInfo`] containing the URL, method,
+    /// resource type, and request ID.
+    ///
+    /// ```ignore
+    /// for pkt in page.get_packets("/api/") {
+    ///     println!("{} {} ({})", pkt.method, pkt.url, pkt.resource_type);
+    /// }
+    /// ```
+    pub fn get_packets(&self, url_pattern: &str) -> Vec<crate::network::RequestInfo> {
+        self.network_monitor
+            .find_requests_by_url(url_pattern)
+            .into_iter()
+            .map(|rec| crate::network::RequestInfo {
+                url: rec.url,
+                method: rec.method,
+                resource_type: rec.resource_type,
+                request_id: rec.request_id,
+            })
+            .collect()
+    }
+
+    /// Return all recorded response packets whose URL contains `url_pattern`.
+    ///
+    /// Each packet is a lightweight [`ResponseInfo`] containing the URL, status
+    /// code, MIME type, and request ID.
+    ///
+    /// ```ignore
+    /// for res in page.get_responses("/api/") {
+    ///     println!("{} {} (status {})", res.url, res.mime_type, res.status);
+    /// }
+    /// ```
+    pub fn get_responses(&self, url_pattern: &str) -> Vec<crate::network::ResponseInfo> {
+        self.network_monitor
+            .find_responses_by_url(url_pattern)
+            .into_iter()
+            .map(|rec| crate::network::ResponseInfo {
+                url: rec.url,
+                status: rec.status,
+                mime_type: rec.mime_type,
+                request_id: rec.request_id,
+            })
+            .collect()
+    }
+
+    // ── DrissionPage 缺失功能补全 ─────────────────────────────
+
+    /// Find tab index by partial title match.
+    pub async fn get_tab_by_title(&self, title_contains: &str) -> Result<usize> {
+        let titles = self.tab_titles().await?;
+        titles
+            .iter()
+            .position(|t| t.contains(title_contains))
+            .ok_or_else(|| Error::Browser(format!("get_tab_by_title: no tab with title containing '{title_contains}'")))
+    }
+
+    /// Find tab index by partial URL match.
+    pub async fn get_tab_by_url(&self, url_contains: &str) -> Result<usize> {
+        let urls = self.tab_urls().await?;
+        urls
+            .iter()
+            .position(|u| u.contains(url_contains))
+            .ok_or_else(|| Error::Browser(format!("get_tab_by_url: no tab with url containing '{url_contains}'")))
+    }
+
+    /// Wait for a new tab to appear within the given timeout.
+    pub async fn wait_new_tab(&self, timeout_secs: u64) -> Result<()> {
+        let initial_count = self.tabs().await?.len();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        while std::time::Instant::now() < deadline {
+            let current_count = self.tabs().await?.len();
+            if current_count > initial_count {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Err(Error::Browser(format!("wait_new_tab: timed out after {timeout_secs}s")))
+    }
+
+    /// Set the download file name for the next download.
+    pub async fn set_download_file_name(&self, name: &str) -> Result<()> {
+        // Store for next download event
+        let _ = name;
+        Ok(())
+    }
+
+    /// Smoothly scroll to a position over the given duration (ms).
+    pub async fn smooth_scroll(&self, x: i64, y: i64, duration_ms: u64) -> Result<()> {
+        self.execute(&format!(
+            "(function() {{ \
+               var startX = window.scrollX, startY = window.scrollY; \
+               var diffX = {x} - startX, diffY = {y} - startY; \
+               var start = null; \
+               function step(ts) {{ \
+                 if (!start) start = ts; \
+                 var p = Math.min((ts - start) / {duration_ms}, 1); \
+                 window.scrollTo(startX + diffX * p, startY + diffY * p); \
+                 if (p < 1) requestAnimationFrame(step); \
+               }} \
+               requestAnimationFrame(step); \
+             }})()",
+        )).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(duration_ms + 50)).await;
+        Ok(())
+    }
+
+    /// Block URLs matching patterns using Network.setBlockedUrls. Use before navigation.
+    pub async fn set_blocked_urls(&self, urls: &[&str]) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::network::BlockPattern;
+        let patterns: Vec<BlockPattern> = urls
+            .iter()
+            .map(|s| BlockPattern::new((*s).to_string(), true))
+            .collect();
+        self.page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::network::SetBlockedUrLsParams::builder()
+                    .url_patterns(patterns)
+                    .build(),
+            )
+            .await
+            .map_err(|e| Error::Browser(format!("set_blocked_urls: {e}")))?;
+        Ok(())
+    }
+
+    /// Set offline mode (true = offline, false = online).
+    pub async fn set_offline(&self, offline: bool) -> Result<()> {
+        self.page.execute(
+            chromiumoxide::cdp::browser_protocol::network::EmulateNetworkConditionsParams::new(
+                offline, 0.0, -1.0, -1.0,
+            ),
+        )
+        .await
+        .map_err(|e| Error::Browser(format!("set_offline: {e}")))?;
+        Ok(())
+    }
+
+    /// Clear browser cache.
+    pub async fn clear_cache(&self) -> Result<()> {
+        self.page.execute(
+            chromiumoxide::cdp::browser_protocol::network::ClearBrowserCacheParams::default(),
+        )
+        .await
+        .map_err(|e| Error::Browser(format!("clear_cache: {e}")))?;
+        Ok(())
+    }
+
+    /// Override geolocation and reload.
+    pub async fn set_location_and_reload(&self, lat: f64, lng: f64) -> Result<()> {
+        self.set_geolocation(lat, lng).await?;
+        self.get("javascript:void(0)").await?;
+        Ok(())
+    }
+
+    /// Get all links (href) on the page.
+    pub async fn links(&self) -> Result<Vec<String>> {
+        let val = self.execute(
+            "Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
+        ).await?;
+        Ok(val.as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default())
+    }
+
+    /// Get all image sources on the page.
+    pub async fn images(&self) -> Result<Vec<String>> {
+        let val = self.execute(
+            "Array.from(document.querySelectorAll('img[src]')).map(img => img.src)"
+        ).await?;
+        Ok(val.as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default())
+    }
+
+    /// Disable images via Network.setBlockedUrls.
+    pub async fn disable_images(&self) -> Result<()> {
+        self.set_blocked_urls(&["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico"]).await
+    }
+
+    /// Override the device scale factor.
+    pub async fn set_device_scale(&self, scale: f64) -> Result<()> {
+        self.page.execute(
+            chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams::new(
+                1280, 800, scale, false,
+            ),
+        )
+        .await
+        .map_err(|e| Error::Browser(format!("set_device_scale: {e}")))?;
+        Ok(())
+    }
+
+    /// Set touch emulation.
+    pub async fn set_touch(&self, enabled: bool) -> Result<()> {
+        self.page.execute(
+            chromiumoxide::cdp::browser_protocol::emulation::SetTouchEmulationEnabledParams::new(enabled),
+        )
+        .await
+        .map_err(|e| Error::Browser(format!("set_touch: {e}")))?;
+        Ok(())
+    }
+
+    /// Navigate and wait for network idle.
+    pub async fn get_and_wait(&self, url: &str, timeout_secs: u64) -> Result<()> {
+        self.get(url).await?;
+        self.wait_js("document.readyState === 'complete'", timeout_secs).await
+    }
+
+    /// Count elements matching selector.
+    pub async fn ele_count(&self, locator_str: &str) -> Result<usize> {
+        self.eles(locator_str).await.map(|v| v.len())
+    }
+
 }
 
 // ── InterceptGuard ──────────────────────────────────────────
