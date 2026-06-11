@@ -1055,6 +1055,124 @@ impl WebPage {
             .await
     }
 
+    /// Execute an async JavaScript expression and wait for the Promise to resolve.
+    ///
+    /// Uses CDP `Runtime.evaluate` with `awaitPromise = true` so that `fetch()`,
+    /// `new Promise()`, and other async patterns complete before returning.
+    ///
+    /// ```ignore
+    /// let json = page.run_async_js("fetch('/api/data').then(r => r.json())").await?;
+    /// ```
+    pub async fn run_async_js(&self, expression: &str) -> Result<serde_json::Value> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("run_async_js requires Chromium mode".into()))?
+            .run_async_js(expression)
+            .await
+    }
+
+    /// Execute a JavaScript function with arguments passed as a JSON value.
+    ///
+    /// The `expression` should be a function declaration. The `args` value is
+    /// serialised and passed as the first argument.
+    ///
+    /// ```ignore
+    /// let args = serde_json::json!({"selector": "#content"});
+    /// let text = page.run_js_with_args(
+    ///     "(a) => { let el = document.querySelector(a.selector); return el ? el.innerText : ''; }",
+    ///     args,
+    /// ).await?;
+    /// ```
+    pub async fn run_js_with_args(
+        &self,
+        expression: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("run_js_with_args requires Chromium mode".into()))?
+            .run_js_with_args(expression, args)
+            .await
+    }
+
+    /// Wait for a download whose URL contains `url_pattern` to complete.
+    ///
+    /// Polls the download manager and returns the
+    /// [`DownloadInfo`](crate::download::DownloadInfo) once a matching
+    /// download reaches a terminal state, or times out after `timeout_secs`.
+    ///
+    /// ```ignore
+    /// let dl = page.wait_for_download("/files/report.pdf", 30).await?;
+    /// ```
+    pub async fn wait_for_download(
+        &self,
+        url_pattern: &str,
+        timeout_secs: u64,
+    ) -> Result<crate::download::DownloadInfo> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("wait_for_download requires Chromium mode".into()))?
+            .wait_for_download(url_pattern, timeout_secs)
+            .await
+    }
+
+    /// Get the `Content-Type` of the current page's main document.
+    ///
+    /// ```ignore
+    /// let ct = page.get_content_type().await?;
+    /// ```
+    pub async fn get_content_type(&self) -> Result<String> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("get_content_type requires Chromium mode".into()))?
+            .get_content_type()
+            .await
+    }
+
+    /// Select all text on the page (Ctrl+A).
+    pub async fn select_all_text(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("select_all_text requires Chromium mode".into()))?
+            .select_all_text()
+            .await
+    }
+
+    /// Copy the currently selected text to the clipboard (Ctrl+C).
+    pub async fn copy_text(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("copy_text requires Chromium mode".into()))?
+            .copy_text()
+            .await
+    }
+
+    /// Paste text from the clipboard (Ctrl+V).
+    pub async fn paste_text(&self) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("paste_text requires Chromium mode".into()))?
+            .paste_text()
+            .await
+    }
+
+    /// Search for `text` on the current page.
+    ///
+    /// Returns `true` if a match was found, `false` otherwise.
+    ///
+    /// ```ignore
+    /// if page.find_text("Welcome").await? {
+    ///     println!("Found!");
+    /// }
+    /// ```
+    pub async fn find_text(&self, text: &str) -> Result<bool> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("find_text requires Chromium mode".into()))?
+            .find_text(text)
+            .await
+    }
+
     // ── Performance metrics (Chromium only) ──────────────────
 
     /// Grant browser permissions for the given origin (Chromium only).

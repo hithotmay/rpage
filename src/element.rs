@@ -1903,6 +1903,218 @@ impl Element {
             tokio::time::sleep(opts.poll_interval).await;
         }
     }
+
+    // ── DOM manipulation helpers ──────────────────────────────
+
+    /// Remove this element from the DOM.
+    ///
+    /// Calls the native `Element.prototype.remove()` so the element is
+    /// immediately detached from the live document tree.
+    pub async fn remove(&self) -> Result<()> {
+        self.js("this.remove()").await
+    }
+
+    /// Set an inline CSS style property on this element.
+    ///
+    /// ```ignore
+    /// element.set_style("color", "red").await?;
+    /// ```
+    pub async fn set_style(&self, property: &str, value: &str) -> Result<()> {
+        let escaped_prop = json_escape(property);
+        let escaped_val = json_escape(value);
+        let js = format!("this.style[{}] = {}", escaped_prop, escaped_val);
+        self.js(&js).await
+    }
+
+    /// Get a computed CSS style property value for this element.
+    ///
+    /// Uses `getComputedStyle(this)[<property>]` which supports both
+    /// camelCase (`backgroundColor`) and CSS kebab-case property names.
+    ///
+    /// ```ignore
+    /// let color = element.get_style("color").await?;
+    /// ```
+    pub async fn get_style(&self, property: &str) -> Result<String> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let escaped = json_escape(property);
+                let function_decl = format!(
+                    "function() {{ return getComputedStyle(this)[{}]; }}",
+                    escaped
+                );
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(function_decl)
+                    .await_promise(false)
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build: {e}")))?;
+                let result = page
+                    .execute(params)
+                    .await
+                    .map_err(|e| Error::Browser(format!("get_style: {e}")))?;
+                if let Some(val) = result.result.result.value {
+                    Ok(val.as_str().unwrap_or("").to_string())
+                } else {
+                    Ok(String::new())
+                }
+            } else {
+                Ok(String::new())
+            }
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Add a CSS class (or multiple space-separated classes) to this element.
+    ///
+    /// ```ignore
+    /// element.add_class("active").await?;
+    /// element.add_class("foo bar").await?;
+    /// ```
+    pub async fn add_class(&self, class: &str) -> Result<()> {
+        let escaped = json_escape(class);
+        let js = format!("this.classList.add({})", escaped);
+        self.js(&js).await
+    }
+
+    /// Remove a CSS class (or multiple space-separated classes) from this element.
+    ///
+    /// ```ignore
+    /// element.remove_class("active").await?;
+    /// ```
+    pub async fn remove_class(&self, class: &str) -> Result<()> {
+        let escaped = json_escape(class);
+        let js = format!("this.classList.remove({})", escaped);
+        self.js(&js).await
+    }
+
+    /// Check whether this element has a given CSS class.
+    ///
+    /// ```ignore
+    /// if element.has_class("active").await? { ... }
+    /// ```
+    pub async fn has_class(&self, class: &str) -> Result<bool> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let escaped = json_escape(class);
+                let function_decl = format!(
+                    "function() {{ return this.classList.contains({}); }}",
+                    escaped
+                );
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(function_decl)
+                    .await_promise(false)
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build: {e}")))?;
+                let result = page
+                    .execute(params)
+                    .await
+                    .map_err(|e| Error::Browser(format!("has_class: {e}")))?;
+                Ok(result
+                    .result
+                    .result
+                    .value
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false))
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Set the `value` property on an input/textarea element using the native
+    /// value setter.
+    ///
+    /// Unlike [`fill()`](Element::fill), this method does **not** focus the
+    /// element first. It uses the prototype's native `value` setter so that
+    /// framework listeners (React, Vue, …) are notified via `input` and
+    /// `change` events.
+    pub async fn set_value(&self, value: &str) -> Result<()> {
+        let escaped = json_escape(value);
+        let js = format!(
+            "(function() {{ \
+               var proto = Object.getPrototypeOf(this); \
+               var desc = null; \
+               while (proto) {{ \
+                 desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
+                 if (desc) break; \
+                 proto = Object.getPrototypeOf(proto); \
+               }} \
+               if (desc && desc.set) {{ \
+                 desc.set.call(this, {}); \
+                 this.dispatchEvent(new Event('input', {{bubbles: true}})); \
+                 this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+               }} \
+             }}).call(this);",
+            escaped
+        );
+        self.js(&js).await
+    }
+
+    /// Get the element's bounding client rectangle as `(x, y, width, height)`.
+    ///
+    /// This is a JavaScript `getBoundingClientRect()` alias, which returns
+    /// the layout rectangle relative to the viewport.
+    pub async fn get_rect(&self) -> Result<(f64, f64, f64, f64)> {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(Error::Browser("requires Chromium mode".into()))?;
+        if let Some(ref oid) = self.object_id {
+            if !oid.is_empty() {
+                use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+                let function_decl = "function(){\
+                    var r=this.getBoundingClientRect();\
+                    return [r.x,r.y,r.width,r.height]\
+                }";
+                let params = CallFunctionOnParams::builder()
+                    .object_id(oid.clone())
+                    .function_declaration(function_decl.to_string())
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build: {e}")))?;
+                let result = page
+                    .execute(params)
+                    .await
+                    .map_err(|e| Error::Browser(format!("get_rect: {e}")))?;
+                let arr = result
+                    .result
+                    .result
+                    .value
+                    .ok_or_else(|| Error::Browser("get_rect: no value".into()))?;
+                let vals: Vec<f64> = arr
+                    .as_array()
+                    .ok_or_else(|| Error::Browser("get_rect: not array".into()))?
+                    .iter()
+                    .filter_map(|v| v.as_f64())
+                    .collect();
+                if vals.len() >= 4 {
+                    Ok((vals[0], vals[1], vals[2], vals[3]))
+                } else {
+                    Err(Error::Browser("get_rect: insufficient values".into()))
+                }
+            } else {
+                Err(Error::Browser("get_rect: empty object_id".into()))
+            }
+        } else {
+            Err(Error::Browser("get_rect: no object_id".into()))
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────

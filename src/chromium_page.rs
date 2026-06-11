@@ -1387,6 +1387,254 @@ impl ChromiumPage {
         Ok(())
     }
 
+    /// Execute an async JavaScript expression and wait for the Promise to resolve.
+    ///
+    /// Uses CDP `Runtime.evaluate` with `awaitPromise = true` so that `fetch()`,
+    /// `new Promise()`, and other async patterns complete before returning.
+    ///
+    /// ```ignore
+    /// let json = page.run_async_js("fetch('https://api.example.com/data').then(r => r.json())").await?;
+    /// ```
+    pub async fn run_async_js(&self, expression: &str) -> Result<serde_json::Value> {
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        let params = EvaluateParams::builder()
+            .expression(expression)
+            .await_promise(true)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| Error::Browser(format!("run_async_js build: {e}")))?;
+        let r = self
+            .page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("run_async_js: {e}")))?;
+        Ok(r.result.result.value.clone().unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Execute a JavaScript function with arguments passed as a JSON value.
+    ///
+    /// The `expression` should be a function declaration. The `args` value is
+    /// serialised and passed as the first argument. Returns the result as a
+    /// `serde_json::Value`.
+    ///
+    /// ```ignore
+    /// let args = serde_json::json!({"selector": "#content"});
+    /// let text = page.run_js_with_args(
+    ///     "(a) => { let el = document.querySelector(a.selector); return el ? el.innerText : ''; }",
+    ///     args,
+    /// ).await?;
+    /// ```
+    pub async fn run_js_with_args(
+        &self,
+        expression: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        use chromiumoxide::cdp::js_protocol::runtime::{
+            CallArgument, CallFunctionOnParams,
+        };
+        let args_json = serde_json::to_string(&args)
+            .unwrap_or_else(|_| "undefined".to_string());
+        let wrapped = format!(
+            "(function(argStr){{ const args = JSON.parse(argStr); return ({expr})(args); }})",
+            expr = expression
+        );
+        let call_arg = CallArgument {
+            value: Some(serde_json::Value::String(args_json)),
+            unserializable_value: None,
+            object_id: None,
+        };
+        let params = CallFunctionOnParams::builder()
+            .function_declaration(wrapped)
+            .argument(call_arg)
+            .await_promise(true)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| Error::Browser(format!("run_js_with_args build: {e}")))?;
+        let r = self
+            .page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("run_js_with_args: {e}")))?;
+        Ok(r.result.result.value.clone().unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Wait for a download whose URL contains `url_pattern` to complete.
+    ///
+    /// Polls the download manager for a download matching the given URL
+    /// substring. Returns the [`DownloadInfo`](crate::download::DownloadInfo)
+    /// once the download reaches a terminal state (completed, cancelled, or
+    /// failed), or times out after `timeout_secs` seconds.
+    ///
+    /// ```ignore
+    /// let dl = page.wait_for_download("/files/report.pdf", 30).await?;
+    /// println!("Saved to: {:?}", dl.save_path);
+    /// ```
+    pub async fn wait_for_download(
+        &self,
+        url_pattern: &str,
+        timeout_secs: u64,
+    ) -> Result<crate::download::DownloadInfo> {
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let list = self.download_manager.list();
+            if let Some(dl) = list.iter().find(|d| d.url.contains(url_pattern)) {
+                if !matches!(dl.status, crate::download::DownloadStatus::InProgress) {
+                    return Ok(dl.clone());
+                }
+            }
+            if start.elapsed() > duration {
+                return Err(Error::Timeout(
+                    format!("wait_for_download timed out waiting for pattern: {url_pattern}"),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Get the `Content-Type` header of the current page's main document.
+    ///
+    /// Uses `document.contentType` when available (e.g. XML documents) and
+    /// falls back to `"text/html"` for standard HTML pages.
+    ///
+    /// ```ignore
+    /// let ct = page.get_content_type().await?;
+    /// assert_eq!(ct, "text/html");
+    /// ```
+    pub async fn get_content_type(&self) -> Result<String> {
+        let val = self
+            .execute("document.contentType || 'text/html'")
+            .await?;
+        val.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| Error::Browser("get_content_type failed".into()))
+    }
+
+    /// Select all text on the page (Ctrl+A).
+    ///
+    /// Sends Ctrl+A keyboard shortcut via CDP input events.
+    pub async fn select_all_text(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        let key_down = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key("a")
+            .code("KeyA")
+            .windows_virtual_key_code(0x41)
+            .native_virtual_key_code(0x41)
+            .modifiers(2) // Control
+            .build()
+            .map_err(|e| Error::Browser(format!("select_all_text build: {e}")))?;
+        self.page
+            .execute(key_down)
+            .await
+            .map_err(|e| Error::Browser(format!("select_all_text: {e}")))?;
+        let key_up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key("a")
+            .code("KeyA")
+            .windows_virtual_key_code(0x41)
+            .native_virtual_key_code(0x41)
+            .modifiers(2)
+            .build()
+            .map_err(|e| Error::Browser(format!("select_all_text up build: {e}")))?;
+        self.page
+            .execute(key_up)
+            .await
+            .map_err(|e| Error::Browser(format!("select_all_text up: {e}")))?;
+        Ok(())
+    }
+
+    /// Copy the currently selected text to the clipboard (Ctrl+C).
+    ///
+    /// Sends Ctrl+C keyboard shortcut via CDP input events.
+    pub async fn copy_text(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        let key_down = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key("c")
+            .code("KeyC")
+            .windows_virtual_key_code(0x43)
+            .native_virtual_key_code(0x43)
+            .modifiers(2) // Control
+            .build()
+            .map_err(|e| Error::Browser(format!("copy_text build: {e}")))?;
+        self.page
+            .execute(key_down)
+            .await
+            .map_err(|e| Error::Browser(format!("copy_text: {e}")))?;
+        let key_up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key("c")
+            .code("KeyC")
+            .windows_virtual_key_code(0x43)
+            .native_virtual_key_code(0x43)
+            .modifiers(2)
+            .build()
+            .map_err(|e| Error::Browser(format!("copy_text up build: {e}")))?;
+        self.page
+            .execute(key_up)
+            .await
+            .map_err(|e| Error::Browser(format!("copy_text up: {e}")))?;
+        Ok(())
+    }
+
+    /// Paste text from the clipboard (Ctrl+V).
+    ///
+    /// Sends Ctrl+V keyboard shortcut via CDP input events.
+    pub async fn paste_text(&self) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        let key_down = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key("v")
+            .code("KeyV")
+            .windows_virtual_key_code(0x56)
+            .native_virtual_key_code(0x56)
+            .modifiers(2) // Control
+            .build()
+            .map_err(|e| Error::Browser(format!("paste_text build: {e}")))?;
+        self.page
+            .execute(key_down)
+            .await
+            .map_err(|e| Error::Browser(format!("paste_text: {e}")))?;
+        let key_up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key("v")
+            .code("KeyV")
+            .windows_virtual_key_code(0x56)
+            .native_virtual_key_code(0x56)
+            .modifiers(2)
+            .build()
+            .map_err(|e| Error::Browser(format!("paste_text up build: {e}")))?;
+        self.page
+            .execute(key_up)
+            .await
+            .map_err(|e| Error::Browser(format!("paste_text up: {e}")))?;
+        Ok(())
+    }
+
+    /// Search for `text` on the current page.
+    ///
+    /// Uses the browser's built-in `window.find()` API. Returns `true` if a
+    /// match was found, `false` otherwise.
+    ///
+    /// ```ignore
+    /// if page.find_text("Welcome").await? {
+    ///     println!("Found!");
+    /// }
+    /// ```
+    pub async fn find_text(&self, text: &str) -> Result<bool> {
+        let escaped = json_escape(text);
+        let js = format!("window.find({escaped})");
+        let val = self.execute(&js).await?;
+        Ok(val.as_bool().unwrap_or(false))
+    }
+
     /// Execute JS on every new document.
     pub async fn evaluate_on_new_document(&self, js: &str) -> Result<()> {
         self.page
