@@ -311,16 +311,17 @@ impl ChromiumPage {
     /// 默认参数），所以浏览器没有任何自动化标记，和用户手动打开的完全一样。
     pub async fn new() -> Result<Self> {
         let chrome_path = find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?;
-        // Use a dedicated user-data-dir to avoid conflicts with running Chrome
-        let ud = std::env::temp_dir().join("rpage-chrome");
-        // Use PID-based port to avoid multi-instance conflicts
-        let port = 9300 + ((std::process::id() as u16) % 700);
+        // Use a unique user-data-dir per PID to prevent Chrome from merging
+        // into an already-running instance (Windows single-instance behavior)
+        let ud = std::env::temp_dir().join(format!("rpage-chrome-{}", std::process::id()));
+        // Use a fixed well-known port for simplicity
+        let port: u16 = 9222;
         Self::launch_and_connect(
             &chrome_path,
             Some(&ud),
             port,
             &[],
-            true,
+            false,       // headless = false, show browser window
             None,
             true,
             false,
@@ -328,6 +329,21 @@ impl ChromiumPage {
             ChromiumOptions::default(),
         )
         .await
+    }
+
+    /// 用自定义端口启动浏览器（便捷方法）。
+    ///
+    /// 等价于 `ChromiumOptions::builder().debug_port(port).build()` 再传给 `with_options`。
+    ///
+    /// ```ignore
+    /// // 默认端口 9222
+    /// let page = ChromiumPage::new().await?;
+    /// // 自定义端口
+    /// let page = ChromiumPage::with_port(9333).await?;
+    /// ```
+    pub async fn with_port(port: u16) -> Result<Self> {
+        let opts = ChromiumOptions::builder().debug_port(port).build();
+        Self::with_options(opts).await
     }
 
     /// 用自定义选项启动浏览器。
@@ -405,7 +421,8 @@ impl ChromiumPage {
         let debug_url = format!("http://127.0.0.1:{port}");
 
         // Check if a browser is already listening on this port
-        let already_running = reqwest::get(format!("{debug_url}/json/version"))
+        // Use TcpStream instead of reqwest to avoid connection-pool / proxy false positives
+        let already_running = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .is_ok();
 
@@ -425,6 +442,10 @@ impl ChromiumPage {
                 let tmp = std::env::temp_dir().join("rpage-chrome");
                 cmd.arg(format!("--user-data-dir={}", tmp.display()));
             }
+
+            // Prevent Chrome from merging into an existing instance
+            cmd.arg("--no-first-run");
+            cmd.arg("--no-default-browser-check");
 
             // Apply headless mode
             if headless {
@@ -455,15 +476,31 @@ impl ChromiumPage {
                 cmd.arg(arg);
             }
 
-            // Windows: create process without console window
+            // Windows: create detached process without console window
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                cmd.creation_flags(0x00000008); // DETACHED_PROCESS
             }
 
-            cmd.spawn()
+            let mut child = cmd.spawn()
                 .map_err(|e| Error::Browser(format!("spawn Chrome: {e}")))?;
+
+            // Check that the child process didn't immediately exit (happens when
+            // Chrome merges into an already-running instance on Windows).
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(Error::Browser(format!(
+                        "Chrome exited immediately with status: {status}. \
+                         Another Chrome instance may be using the same user-data-dir."
+                    )));
+                }
+                Ok(None) => { /* still running, good */ }
+                Err(e) => {
+                    return Err(Error::Browser(format!("check Chrome process: {e}")));
+                }
+            }
 
             // Wait for debug port to be ready
             Self::wait_for_port(debug_url.clone()).await?;

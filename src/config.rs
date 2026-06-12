@@ -144,6 +144,11 @@ impl ChromiumOptionsBuilder {
         self
     }
 
+    pub fn debug_port(mut self, port: u16) -> Self {
+        self.opts.debug_port = port;
+        self
+    }
+
     pub fn arg(mut self, a: impl Into<String>) -> Self {
         self.opts.extra_args.push(a.into());
         self
