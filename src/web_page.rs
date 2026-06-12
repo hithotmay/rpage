@@ -901,8 +901,8 @@ impl WebPage {
 
     // ── Low-level access ─────────────────────────────────────
 
-    /// Access the underlying CDP page for advanced operations.
-    pub fn inner_page(&self) -> Option<&chromiumoxide::Page> {
+    /// Access the underlying CDP page for advanced operations (cheap Arc clone).
+    pub fn inner_page(&self) -> Option<chromiumoxide::Page> {
         self.chromium.as_ref().map(|c| c.inner_page())
     }
 
@@ -1005,7 +1005,7 @@ impl WebPage {
     ///     .perform()
     ///     .await?;
     /// ```
-    pub fn actions(&self) -> Option<ActionChain<'_>> {
+    pub fn actions(&self) -> Option<ActionChain> {
         self.chromium.as_ref().map(|c| c.actions())
     }
 
