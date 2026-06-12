@@ -275,7 +275,10 @@ impl Element {
     /// Click this element. Falls back to JS click if CDP click fails.
     /// For XPath-backed elements, uses JS XPath re-location.
     pub async fn click(&self) -> Result<()> {
-        // If we have a fallback_xpath, use JS-based click directly
+        let page = self.page.as_ref()
+            .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
+
+        // If we have a fallback_xpath, get coordinates via JS and use CDP mouse events
         if let Some(ref xpath) = self.fallback_xpath {
             let escaped = serde_json::to_string(xpath).unwrap_or_else(|_| format!("\"{}\"", xpath));
             let js = format!(
@@ -283,21 +286,54 @@ impl Element {
                    var result = document.evaluate({xp}, document, null, \
                      XPathResult.FIRST_ORDERED_NODE_TYPE, null); \
                    var el = result.singleNodeValue; \
-                   if (!el) return false; \
+                   if (!el) return null; \
                    el.scrollIntoView({{block:'center'}}); \
-                   el.click(); \
-                   return true; \
+                   var r = el.getBoundingClientRect(); \
+                   return JSON.stringify({{x: r.x + r.width/2, y: r.y + r.height/2}}); \
                  }})()",
                 xp = escaped
             );
-            let page = self.page.as_ref()
-                .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
             let val = page.evaluate(js.as_str()).await
-                .map_err(|e| Error::Browser(format!("xpath click: {e}")))?;
-            if val.value().and_then(|v| v.as_bool()).unwrap_or(false) {
-                return Ok(());
-            }
-            return Err(Error::ElementNotFound(format!("xpath click failed: {}", xpath)));
+                .map_err(|e| Error::Browser(format!("xpath click coord: {e}")))?;
+
+            let coord_str = val.value().and_then(|v| v.as_str())
+                .ok_or_else(|| Error::ElementNotFound(format!("xpath click: element not found: {}", xpath)))?;
+
+            let coord: serde_json::Value = serde_json::from_str(coord_str)
+                .map_err(|e| Error::Browser(format!("parse coord: {e}")))?;
+            let x = coord["x"].as_f64().unwrap_or(0.0);
+            let y = coord["y"].as_f64().unwrap_or(0.0);
+
+            use chromiumoxide::cdp::browser_protocol::input::{
+                DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+            };
+
+            // MouseMoved → MousePressed → MouseReleased (real browser click)
+            let moved = DispatchMouseEventParams::builder()
+                .r#type(DispatchMouseEventType::MouseMoved)
+                .x(x).y(y)
+                .build().map_err(|e| Error::Browser(format!("build: {e}")))?;
+            page.execute(moved).await.ok();
+
+            let pressed = DispatchMouseEventParams::builder()
+                .r#type(DispatchMouseEventType::MousePressed)
+                .x(x).y(y)
+                .button(MouseButton::Left)
+                .click_count(1)
+                .build().map_err(|e| Error::Browser(format!("build: {e}")))?;
+            page.execute(pressed).await
+                .map_err(|e| Error::Browser(format!("mouse press: {e}")))?;
+
+            let released = DispatchMouseEventParams::builder()
+                .r#type(DispatchMouseEventType::MouseReleased)
+                .x(x).y(y)
+                .button(MouseButton::Left)
+                .click_count(1)
+                .build().map_err(|e| Error::Browser(format!("build: {e}")))?;
+            page.execute(released).await
+                .map_err(|e| Error::Browser(format!("mouse release: {e}")))?;
+
+            return Ok(());
         }
 
         let cdp_el = self.cdp_element().await?;
