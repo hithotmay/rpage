@@ -1,4 +1,13 @@
 //! SyncPage demo — no #[tokio::main], no .await, pure synchronous style.
+//!
+//! Usage:
+//!   1. Launch Chrome with remote debugging:
+//!      chrome --remote-debugging-port=9222
+//!   2. Run this example:
+//!      cargo run --example sync_demo
+//!
+//! The example will connect to your existing browser and operate on the
+//! currently active tab — no new tabs are opened.
 
 use rpage::sync_page::SyncPage;
 
@@ -6,8 +15,9 @@ fn main() -> rpage::Result<()> {
     println!("=== SyncPage Demo ===\n");
 
     // Connect to existing Chrome debug port
+    // Picks up the currently active (visible) tab automatically.
     let page = SyncPage::connect("http://127.0.0.1:9222")?;
-    println!("✓ Connected");
+    println!("✓ Connected to active tab");
 
     // Navigate
     page.get("https://www.example.com")?;

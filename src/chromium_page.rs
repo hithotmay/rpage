@@ -554,6 +554,47 @@ impl ChromiumPage {
     pub async fn connect_with_opts(debug_url: &str, opts: ChromiumOptions) -> Result<Self> {
         info!("Connecting to existing browser at {debug_url}");
 
+        // ── Step 1: Discover existing targets via HTTP BEFORE connecting via CDP ──
+        // The HTTP /json/list endpoint returns all existing targets reliably,
+        // unlike chromiumoxide's pages() which depends on async event processing
+        // and may return an empty list due to a race condition.
+        #[derive(serde::Deserialize)]
+        struct TargetEntry {
+            id: String,
+            #[serde(rename = "type")]
+            target_type: String,
+            url: String,
+            #[allow(dead_code)]
+            title: String,
+        }
+        let existing_targets: Vec<TargetEntry> = {
+            let list_url = format!("{debug_url}/json/list");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .map_err(|e| Error::Browser(format!("http client: {e}")))?;
+            let resp = client
+                .get(&list_url)
+                .send()
+                .await
+                .map_err(|e| Error::Browser(format!("fetch targets: {e}")))?;
+            resp.json()
+                .await
+                .map_err(|e| Error::Browser(format!("parse targets: {e}")))?
+        };
+
+        let page_targets: Vec<&TargetEntry> = existing_targets
+            .iter()
+            .filter(|t| t.target_type == "page")
+            .collect();
+
+        info!(
+            "Discovered {} existing targets ({} pages)",
+            existing_targets.len(),
+            page_targets.len(),
+        );
+
+        // ── Step 2: Connect via CDP ──
         let (browser, handler) = Browser::connect(debug_url)
             .await
             .map_err(|e| Error::Browser(format!("connect: {e}")))?;
@@ -563,21 +604,70 @@ impl ChromiumPage {
             while h.next().await.is_some() {}
         });
 
-        // Get the first existing page, or create one
-        let pages = browser
-            .pages()
-            .await
-            .map_err(|e| Error::Browser(format!("get pages: {e}")))?;
+        // ── Step 3: Pick the right page ──
+        // Give the handler a moment to process initial target events so
+        // get_page() can find them.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let page = if let Some(p) = pages.into_iter().next() {
-            info!("Reusing existing page");
-            p
-        } else {
-            info!("Creating new page");
+        let page = if page_targets.is_empty() {
+            info!("No existing page targets, creating new page");
             browser
                 .new_page("about:blank")
                 .await
                 .map_err(|e| Error::Browser(format!("new page: {e}")))?
+        } else if page_targets.len() == 1 {
+            let tid = &page_targets[0].id;
+            info!("Reusing single existing page (id={tid}, url={})", page_targets[0].url);
+            // Retry get_page a few times — the handler may not have registered
+            // the target yet.
+            let mut page = None;
+            for _ in 0..10 {
+                if let Ok(p) = browser.get_page(tid.clone().into()).await {
+                    page = Some(p);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            page.ok_or_else(|| {
+                Error::Browser(format!("target {tid} known via /json/list but not in handler"))
+            })?
+        } else {
+            // Multiple page targets: find the one that's currently visible.
+            let mut found: Option<Page> = None;
+            for t in &page_targets {
+                if let Ok(p) = browser.get_page(t.id.clone().into()).await {
+                    if let Ok(res) = p.evaluate("document.visibilityState").await {
+                        if let Some(val) = res.value().and_then(|v| v.as_str()) {
+                            if val == "visible" {
+                                info!(
+                                    "Reusing active (visible) page (id={}, url={})",
+                                    t.id, t.url
+                                );
+                                found = Some(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(p) = found {
+                p
+            } else {
+                // Fallback: use the first page target
+                let tid = &page_targets[0].id;
+                info!("No visible page found, reusing first page (id={tid})");
+                let mut page = None;
+                for _ in 0..10 {
+                    if let Ok(p) = browser.get_page(tid.clone().into()).await {
+                        page = Some(p);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                page.ok_or_else(|| {
+                    Error::Browser(format!("target {tid} known via /json/list but not in handler"))
+                })?
+            }
         };
 
         // Apply stealth scripts

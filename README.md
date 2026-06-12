@@ -8,6 +8,7 @@
 
 - **一个函数启动** — `WebPage::new()` 自动检测 Chrome → 启动子进程 → CDP 连接
 - **零自动化标记** — 不传 `--enable-automation`，永不触发验证码
+- **智能标签接管** — `connect()` 自动选择当前激活标签页，不会误开新标签
 - **自动反检测** — stealth 脚本自动注入
 - **Cookie 互通** — 浏览器 ↔ HTTP 会话共享 Cookie，支持导入/导出文件
 - **智能等待** — `get()` 等加载，`ele()`/`eles()` 自动重试，超时可配置
@@ -42,7 +43,7 @@
 - **Init Script** — 页面加载前注入 JS
 - **CSS 注入** — 动态注入/移除 CSS 样式
 - **灵活配置** — 环境变量 `RPAGE_CHROME_PATH`，PATH 搜索，标准路径
-- **同步 API** — `SyncPage` 零 await 封装，`SyncPage::connect()` 一步到位
+- **同步 API** — `SyncPage` 零 await 封装，`SyncPage::connect()` 一步到位，自动接管当前激活标签页
 - **Agent 智能接口** — `interactive_elements()`/`page_snapshot()`/`smart_click()`/`smart_fill()` 直接给 AI Agent 用
 - **JS XPath 回退** — 非 CSS 定位器（`text:`/`tag:`）自动回退 XPath
 
@@ -82,7 +83,7 @@ page.goto("https://www.baidu.com").await?
 use rpage::sync::SyncPage;
 
 fn main() -> rpage::Result<()> {
-    let p = SyncPage::connect("http://127.0.0.1:9222")?;  // 连接已有 Chrome
+    let p = SyncPage::connect("http://127.0.0.1:9222")?;  // 自动接管当前激活标签页
 
     p.get("https://httpbin.org/forms/post")?;
     p.type_text("input[name='custname']", "张三")?;
