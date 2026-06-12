@@ -619,6 +619,27 @@ impl WebPage {
             .await
     }
 
+    /// Activate a tab by partial title match and switch the internal operation target.
+    ///
+    /// After calling this, all subsequent methods (`ele`, `click`, `execute`, etc.)
+    /// operate on the activated tab.
+    pub async fn activate_tab(&self, keyword: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("activate_tab requires Chromium mode".into()))?
+            .activate_tab(keyword)
+            .await
+    }
+
+    /// Activate a tab by partial URL match and switch the internal operation target.
+    pub async fn activate_tab_by_url(&self, keyword: &str) -> Result<()> {
+        self.chromium
+            .as_ref()
+            .ok_or_else(|| Error::Browser("activate_tab_by_url requires Chromium mode".into()))?
+            .activate_tab_by_url(keyword)
+            .await
+    }
+
     /// Set a cookie.
     pub async fn set_cookie(&self, cookie: crate::chromium_page::CookieInfo) -> Result<()> {
         self.chromium
