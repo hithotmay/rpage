@@ -2194,25 +2194,34 @@ impl ChromiumPage {
     /// Wait for an element matching the locator to appear.
     pub async fn wait_ele(&self, locator_str: &str, timeout_secs: u64) -> Result<Element> {
         let locator = crate::locator::parse_locator(locator_str)?;
-        let selector = locator_to_selector(&locator)?;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
-        loop {
-            match self.page().find_element(&selector).await {
-                Ok(cdp_el) => {
-                    return self.build_element_from_cdp(cdp_el, locator).await;
-                }
-                Err(_) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(Error::Timeout(format!(
-                            "wait_ele '{}' timed out after {}s",
-                            locator_str, timeout_secs
-                        )));
+        // CSS locator: use CDP querySelector (fast)
+        if locator.is_css() {
+            let selector = locator_to_selector(&locator)?;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            loop {
+                match self.page().find_element(&selector).await {
+                    Ok(cdp_el) => {
+                        return self.build_element_from_cdp(cdp_el, locator).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    Err(_) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(Error::Timeout(format!(
+                                "wait_ele '{}' timed out after {}s",
+                                locator_str, timeout_secs
+                            )));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
                 }
             }
         }
+
+        // Non-CSS locator (text=, xpath:, etc.): use JS XPath fallback
+        let xpath = locator.to_xpath().ok_or_else(|| {
+            Error::InvalidLocator(format!("cannot convert to xpath: {locator_str}"))
+        })?;
+        self.ele_by_xpath_fallback(&xpath, timeout_secs).await
     }
 
     /// Wait for an element matching the locator to become hidden or be removed.
