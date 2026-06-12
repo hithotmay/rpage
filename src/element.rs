@@ -45,6 +45,9 @@ pub struct Element {
     locator: Option<Locator>,
     /// CDP remote-object id (for direct CDP calls in Chromium mode)
     object_id: Option<String>,
+    /// XPath expression used to find this element via JS fallback.
+    /// When present, click/input/fill use JS XPath re-location instead of CDP.
+    fallback_xpath: Option<String>,
     /// Outer HTML
     html: String,
     /// Tag name (lowercase)
@@ -67,12 +70,38 @@ impl Element {
         tag: String,
         text: String,
         attrs: Vec<(String, String)>,
+        fallback_xpath: Option<String>,
     ) -> Self {
         Self {
             page: Some(page.clone()),
             page_ref: PageRef::Cdp(page),
             locator,
             object_id: Some(object_id),
+            fallback_xpath,
+            html,
+            tag,
+            text,
+            attrs,
+        }
+    }
+
+    /// Create a CDP-backed element that was found via JS XPath fallback.
+    /// Stores the xpath for re-location when CDP object_id is stale.
+    pub fn new_cdp_with_xpath(
+        page: Page,
+        locator: Option<Locator>,
+        xpath: String,
+        html: String,
+        tag: String,
+        text: String,
+        attrs: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            page: Some(page.clone()),
+            page_ref: PageRef::Cdp(page),
+            locator,
+            object_id: None,
+            fallback_xpath: Some(xpath),
             html,
             tag,
             text,
@@ -93,6 +122,7 @@ impl Element {
             page_ref: PageRef::Session,
             locator,
             object_id: None,
+            fallback_xpath: None,
             html,
             tag,
             text,
@@ -243,7 +273,33 @@ impl Element {
     // ── Async interactions (CDP only) ────────────────────────
 
     /// Click this element. Falls back to JS click if CDP click fails.
+    /// For XPath-backed elements, uses JS XPath re-location.
     pub async fn click(&self) -> Result<()> {
+        // If we have a fallback_xpath, use JS-based click directly
+        if let Some(ref xpath) = self.fallback_xpath {
+            let escaped = serde_json::to_string(xpath).unwrap_or_else(|_| format!("\"{}\"", xpath));
+            let js = format!(
+                "(function() {{ \
+                   var result = document.evaluate({xp}, document, null, \
+                     XPathResult.FIRST_ORDERED_NODE_TYPE, null); \
+                   var el = result.singleNodeValue; \
+                   if (!el) return false; \
+                   el.scrollIntoView({{block:'center'}}); \
+                   el.click(); \
+                   return true; \
+                 }})()",
+                xp = escaped
+            );
+            let page = self.page.as_ref()
+                .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
+            let val = page.evaluate(js.as_str()).await
+                .map_err(|e| Error::Browser(format!("xpath click: {e}")))?;
+            if val.value().and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Ok(());
+            }
+            return Err(Error::ElementNotFound(format!("xpath click failed: {}", xpath)));
+        }
+
         let cdp_el = self.cdp_element().await?;
         // Try scroll + CDP click first
         if cdp_el.scroll_into_view().await.is_ok() && cdp_el.click().await.is_ok() {
@@ -1000,7 +1056,7 @@ impl Element {
     }
 
     /// Helper: evaluate a JS expression that returns an element node,
-    /// parse its outerHTML, and return a new `Element`.
+    /// parse its outerHTML, and return a new `Element` **with a valid object_id**.
     async fn js_element(&self, js_expr: &str) -> Result<Element> {
         let page = self
             .page
@@ -1009,33 +1065,74 @@ impl Element {
         if let Some(ref oid) = self.object_id {
             if !oid.is_empty() {
                 use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
-                let fn_decl = format!(
-                    "function() {{ var el = {}; return el ? el.outerHTML : null; }}",
+
+                // Step 1: Call the JS expression and return the element RemoteObject
+                //         to obtain its object_id (NOT return_by_value).
+                let fn_decl_obj = format!(
+                    "function() {{ var el = {}; return el; }}",
                     js_expr
                 );
-                let params = CallFunctionOnParams::builder()
+                let params_obj = CallFunctionOnParams::builder()
                     .object_id(oid.clone())
-                    .function_declaration(fn_decl)
+                    .function_declaration(fn_decl_obj)
+                    .return_by_value(false)
+                    .build()
+                    .map_err(|e| Error::Browser(format!("build obj: {e}")))?;
+                let result_obj = page
+                    .execute(params_obj)
+                    .await
+                    .map_err(|e| Error::Browser(format!("js_element obj: {e}")))?;
+                let new_oid = result_obj
+                    .result
+                    .result
+                    .object_id
+                    .ok_or_else(|| Error::ElementNotFound("js_element: null element".into()))?;
+
+                // Step 2: Get the outerHTML via the new object_id.
+                let fn_decl_html = "function() { return this.outerHTML; }".to_string();
+                let params_html = CallFunctionOnParams::builder()
+                    .object_id(new_oid.clone())
+                    .function_declaration(fn_decl_html)
                     .return_by_value(true)
                     .build()
-                    .map_err(|e| Error::Browser(format!("build: {e}")))?;
-                let result = page
-                    .execute(params)
+                    .map_err(|e| Error::Browser(format!("build html: {e}")))?;
+                let result_html = page
+                    .execute(params_html)
                     .await
-                    .map_err(|e| Error::Browser(format!("js_element: {e}")))?;
-                let html_str = result
+                    .map_err(|e| Error::Browser(format!("js_element html: {e}")))?;
+                let html_str = result_html
                     .result
                     .result
                     .value
                     .and_then(|v| v.as_str().map(String::from))
-                    .ok_or_else(|| Error::ElementNotFound("no element returned".into()))?;
+                    .ok_or_else(|| Error::ElementNotFound("no outerHTML".into()))?;
+
                 let doc = scraper::Html::parse_document(&html_str);
                 let sel = Selector::parse("*").unwrap();
                 let el_ref = doc
                     .select(&sel)
                     .next()
                     .ok_or_else(|| Error::ElementNotFound("parse element".into()))?;
-                Ok(from_scraper_element(&el_ref, None, self.page.clone()))
+
+                let tag = el_ref.value().name().to_string();
+                let attrs: Vec<(String, String)> = el_ref
+                    .value()
+                    .attrs()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                let text = el_ref.text().collect::<Vec<_>>().join("");
+                let el_html = el_ref.html();
+
+                Ok(Element::new_cdp(
+                    page.clone(),
+                    new_oid.into(),
+                    None, // locator
+                    el_html,
+                    tag,
+                    text,
+                    attrs,
+                    None, // fallback_xpath
+                ))
             } else {
                 Err(Error::ElementNotFound("no object_id".into()))
             }
@@ -1319,6 +1416,7 @@ impl Element {
             tag,
             text,
             attrs,
+            None,
         ))
     }
 
@@ -1444,6 +1542,7 @@ impl Element {
                 tag,
                 text,
                 attrs,
+                None,
             ));
         }
 
@@ -1500,6 +1599,7 @@ impl Element {
             tag,
             text,
             attrs,
+            None,
         ))
     }
 
@@ -2143,6 +2243,7 @@ pub(crate) fn from_scraper_element(
             tag,
             text,
             attrs,
+            None,
         )
     } else {
         Element::new_session(locator, html, tag, text, attrs)

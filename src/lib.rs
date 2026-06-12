@@ -18,9 +18,13 @@ pub mod stealth;
 pub mod wait;
 pub mod websocket;
 
+pub mod agent;
 pub mod chromium_page;
+pub mod js_helpers;
+pub mod sync_page;
 pub mod web_page;
 
+pub mod sync;
 pub mod prelude;
 
 // Re-export key types at crate root

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>rpage Full Showcase</title>
+<style>
+body { font-family: sans-serif; margin: 0; padding: 20px; }
+h1 { color: #1a73e8; }
+form { max-width: 400px; margin: 20px 0; }
+input, select, textarea { display: block; margin: 8px 0; padding: 6px; width: 100%; box-sizing: border-box; }
+button { margin: 8px 4px; padding: 8px 16px; cursor: pointer; }
+nav a { margin-right: 12px; color: #1a73e8; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1 id="main-title">rpage 测试页面</h1>
+  <p class="desc">这是一个综合测试页面</p>
+  <p class="desc">第二段描述文字</p>
+  <nav>
+    <a href="https://example.com" id="nav-home">首页</a>
+    <a href="https://example.com/about" id="nav-about">关于</a>
+    <a href="https://example.com/contact" id="nav-contact">联系</a>
+  </nav>
+  <form id="login-form">
+    <input name="username" type="text" placeholder="用户名">
+    <input name="password" type="password" placeholder="密码">
+    <input name="email" type="email" placeholder="邮箱">
+    <select name="city">
+      <option value="bj">北京</option>
+      <option value="sh" selected>上海</option>
+      <option value="gz">广州</option>
+    </select>
+    <textarea name="bio" rows="3">个人简介</textarea>
+    <input type="checkbox" name="agree" id="agree">
+    <label for="agree">同意条款</label>
+    <button type="button" id="btn-submit">提交</button>
+    <button type="button" id="btn-reset">重置</button>
+  </form>
+  <div id="status-bar" style="padding:10px;background:#e8f5e9">状态: 就绪</div>
+  <div id="long-content" style="height:3000px;background:linear-gradient(#f0f0f0,#ddd)">
+    <p style="padding:20px">长内容区域 — 用于滚动测试</p>
+  </div>
+  <footer id="footer">页脚信息 © 2024</footer>
+</div>
+<script>
+document.getElementById('btn-submit').addEventListener('click', function() {
+  document.getElementById('status-bar').textContent = '状态: 已提交 ✓';
+});
+document.getElementById('btn-reset').addEventListener('click', function() {
+  document.getElementById('status-bar').textContent = '状态: 已重置';
+  document.getElementById('login-form').reset();
+});
+</script>
+</body>
+</html>

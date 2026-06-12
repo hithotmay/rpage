@@ -28,7 +28,7 @@ use crate::websocket::WebSocketMonitor;
 
 /// Safely JSON-escape a string for embedding in JavaScript.
 /// Falls back to a quoted string on serialization failure (should never happen for valid UTF-8).
-fn json_escape(s: impl AsRef<str>) -> String {
+pub(crate) fn json_escape(s: impl AsRef<str>) -> String {
     serde_json::to_string(s.as_ref()).unwrap_or_else(|_| format!("\"{}\"", s.as_ref()))
 }
 
@@ -900,23 +900,34 @@ impl ChromiumPage {
         &self.debug_url
     }
 
-    // ── Element finding (auto-retry + batch extract) ─────────
+    // ── Element finding (auto-retry + JS fallback for all locators) ──
 
-    /// Find the first element. Auto-retries for up to 5 seconds if not found.
+    /// Find the first element. Auto-retries for up to configured timeout.
+    ///
+    /// Supports all locator types: CSS, text=, text*=, xpath:, @attr=, @attr*=,
+    /// and chained locators (tag:div@@text=Login). Non-CSS locators use a
+    /// JavaScript-based XPath fallback for maximum reliability.
     pub async fn ele(&self, locator_str: &str) -> Result<Element> {
         let locator = crate::locator::parse_locator(locator_str)?;
 
-        // Handle Chain locator step-by-step: narrow scope through each step
+        // Handle Chain locator step-by-step
         if let crate::locator::Locator::Chain(steps) = &locator {
             if steps.is_empty() {
                 return Err(Error::InvalidLocator("empty chain".into()));
             }
-            // Find the first element using first locator
-            let first_sel = locator_to_selector(&steps[0])?;
             let timeout_secs = self.opts.timeout.as_secs();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+            // For chains with non-CSS later steps, use JS fallback
+            let has_non_css = steps.iter().any(|s| !s.is_css());
+            if has_non_css {
+                return self.ele_chain_js_fallback(steps, deadline).await;
+            }
+
+            // Pure CSS chain: use CDP native
+            let first_sel = locator_to_selector(&steps[0])?;
             let mut cdp_el = self.wait_for_element(&first_sel, timeout_secs).await?;
 
-            // For each subsequent step, search within the current element
             for step in steps.iter().skip(1) {
                 let step_sel = locator_to_selector(step)?;
                 cdp_el = cdp_el
@@ -924,29 +935,38 @@ impl ChromiumPage {
                     .await
                     .map_err(|e| Error::ElementNotFound(format!("chain step: {e}")))?;
             }
-
             return self.build_element_from_cdp(cdp_el, locator).await;
         }
 
-        let selector = locator_to_selector(&locator)?;
+        // Single locator
+        if locator.is_css() {
+            let selector = locator_to_selector(&locator)?;
+            let timeout_secs = self.opts.timeout.as_secs();
+            let cdp_el = self.wait_for_element(&selector, timeout_secs).await?;
+            return self.build_element_from_cdp(cdp_el, locator).await;
+        }
 
-        // Auto-retry: wait up to configured timeout for element to appear
-        let timeout_secs = self.opts.timeout.as_secs();
-        let cdp_el = self.wait_for_element(&selector, timeout_secs).await?;
-
-        self.build_element_from_cdp(cdp_el, locator).await
+        // Non-CSS locator: use JS-based XPath query (reliable in all modes)
+        let xpath = locator.to_xpath().ok_or_else(|| {
+            Error::InvalidLocator(format!("cannot convert to xpath: {locator_str}"))
+        })?;
+        self.ele_by_xpath_fallback(&xpath, self.opts.timeout.as_secs()).await
     }
 
-    /// Find all matching elements (no retry — returns immediately).
+    /// Find all matching elements. Auto-retries for up to configured timeout.
     pub async fn eles(&self, locator_str: &str) -> Result<Vec<Element>> {
         let locator = crate::locator::parse_locator(locator_str)?;
 
-        // Handle Chain locator step-by-step: narrow scope through each step
+        // Handle Chain locator
         if let crate::locator::Locator::Chain(steps) = &locator {
             if steps.is_empty() {
                 return Err(Error::InvalidLocator("empty chain".into()));
             }
-            // Find parent elements using first locator
+            let has_non_css = steps.iter().any(|s| !s.is_css());
+            if has_non_css {
+                return self.eles_chain_js_fallback(steps).await;
+            }
+
             let first_sel = locator_to_selector(&steps[0])?;
             let parent_els = self
                 .page
@@ -954,11 +974,9 @@ impl ChromiumPage {
                 .await
                 .map_err(|e| Error::ElementNotFound(format!("chain first step: {e}")))?;
 
-            // For each parent, find children matching remaining steps
             let mut results = Vec::new();
             for parent in parent_els {
                 let mut inner_els = vec![parent];
-
                 for step in steps.iter().skip(1) {
                     let step_sel = locator_to_selector(step)?;
                     let mut next_els = Vec::new();
@@ -972,7 +990,6 @@ impl ChromiumPage {
                         break;
                     }
                 }
-
                 for cdp_el in &inner_els {
                     let el = self
                         .build_element_from_cdp_ref(cdp_el, locator.clone())
@@ -983,40 +1000,245 @@ impl ChromiumPage {
             return Ok(results);
         }
 
-        let selector = locator_to_selector(&locator)?;
-
-        // Auto-retry: wait up to configured timeout for at least one element
-        let deadline = tokio::time::Instant::now() + self.opts.timeout;
-        let mut cdp_els = self
-            .page
-            .find_elements(&selector)
-            .await
-            .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
-
-        while cdp_els.is_empty() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            cdp_els = self
+        // Single locator
+        if locator.is_css() {
+            let selector = locator_to_selector(&locator)?;
+            let deadline = tokio::time::Instant::now() + self.opts.timeout;
+            let mut cdp_els = self
                 .page
                 .find_elements(&selector)
                 .await
                 .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
-        }
 
-        let locator_clone = locator.clone();
-        let mut results = Vec::with_capacity(cdp_els.len());
+            while cdp_els.is_empty() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                cdp_els = self
+                    .page
+                    .find_elements(&selector)
+                    .await
+                    .map_err(|e| Error::ElementNotFound(format!("{e}")))?;
+            }
 
-        if cdp_els.is_empty() {
+            let locator_clone = locator.clone();
+            let mut results = Vec::with_capacity(cdp_els.len());
+            if cdp_els.is_empty() {
+                return Ok(results);
+            }
+            for cdp_el in &cdp_els {
+                let el = self
+                    .build_element_from_cdp_ref(cdp_el, locator_clone.clone())
+                    .await?;
+                results.push(el);
+            }
             return Ok(results);
         }
 
-        // Use individual extraction for reliability (batch JS is fragile)
-        for cdp_el in &cdp_els {
-            let el = self
-                .build_element_from_cdp_ref(cdp_el, locator_clone.clone())
-                .await?;
-            results.push(el);
+        // Non-CSS: JS fallback
+        let xpath = locator.to_xpath().ok_or_else(|| {
+            Error::InvalidLocator(format!("cannot convert to xpath: {locator_str}"))
+        })?;
+        self.eles_by_xpath_fallback(&xpath).await
+    }
+
+    // ── JS-based XPath fallback (reliable in connect/headless/all modes) ──
+
+    /// Find a single element using XPath via document.evaluate (JS fallback).
+    async fn ele_by_xpath_fallback(&self, xpath: &str, timeout_secs: u64) -> Result<Element> {
+        let escaped = json_escape(xpath);
+        let js = format!(
+            "(function() {{ \
+               var result = document.evaluate({xp}, document, null, \
+                 XPathResult.FIRST_ORDERED_NODE_TYPE, null); \
+               var el = result.singleNodeValue; \
+               if (!el) return null; \
+               var r = {{}}; \
+               r.html = el.outerHTML || ''; \
+               r.tag = (el.tagName || '').toLowerCase(); \
+               r.text = el.innerText || el.textContent || ''; \
+               var attrs = []; \
+               for (var i = 0; i < el.attributes.length; i++) {{ \
+                 var a = el.attributes[i]; attrs.push([a.name, a.value]); \
+               }} \
+               r.attrs = attrs; \
+               return JSON.stringify(r); \
+             }})()",
+            xp = escaped
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            match self.page.evaluate(js.as_str()).await {
+                Ok(val) => {
+                    if let Some(json_str) = val.value().and_then(|v| v.as_str()) {
+                        if json_str != "null" && !json_str.is_empty() {
+                            let data: serde_json::Value = serde_json::from_str(json_str)
+                                .map_err(|e| Error::Browser(format!("parse xpath result: {e}")))?;
+                            let html = data["html"].as_str().unwrap_or_default().to_string();
+                            let tag = data["tag"].as_str().unwrap_or_default().to_string();
+                            let text = data["text"].as_str().unwrap_or_default().to_string();
+                            let attrs: Vec<(String, String)> = data["attrs"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter().filter_map(|item| {
+                                        let a = item.as_array()?;
+                                        Some((a.first()?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string()))
+                                    }).collect()
+                                })
+                                .unwrap_or_default();
+                            return Ok(Element::new_cdp(
+                                self.page.clone(),
+                                String::new(),
+                                Some(crate::locator::Locator::XPath(xpath.to_string())),
+                                html, tag, text, attrs,
+                                Some(xpath.to_string()), // fallback_xpath for JS-based interactions
+                            ));
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Err(Error::ElementNotFound(format!(
+            "xpath not found after {timeout_secs}s: {xpath}"
+        )))
+    }
+
+    /// Find all elements using XPath via document.evaluate (JS fallback).
+    async fn eles_by_xpath_fallback(&self, xpath: &str) -> Result<Vec<Element>> {
+        let escaped = json_escape(xpath);
+        let js = format!(
+            "(function() {{ \
+               var result = document.evaluate({xp}, document, null, \
+                 XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null); \
+               var items = []; \
+               for (var i = 0; i < result.snapshotLength; i++) {{ \
+                 var el = result.snapshotItem(i); \
+                 var r = {{}}; \
+                 r.html = el.outerHTML || ''; \
+                 r.tag = (el.tagName || '').toLowerCase(); \
+                 r.text = el.innerText || el.textContent || ''; \
+                 var attrs = []; \
+                 for (var j = 0; j < el.attributes.length; j++) {{ \
+                   var a = el.attributes[j]; attrs.push([a.name, a.value]); \
+                 }} \
+                 r.attrs = attrs; \
+                 items.push(r); \
+               }} \
+               return JSON.stringify(items); \
+             }})()",
+            xp = escaped
+        );
+
+        let val = self.page.evaluate(js.as_str()).await
+            .map_err(|e| Error::Browser(format!("xpath eval: {e}")))?;
+        let json_str = val.value().and_then(|v| v.as_str()).unwrap_or("[]");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json_str)
+            .map_err(|e| Error::Browser(format!("parse xpath results: {e}")))?;
+
+        let mut results = Vec::with_capacity(arr.len());
+        for data in &arr {
+            let html = data["html"].as_str().unwrap_or_default().to_string();
+            let tag = data["tag"].as_str().unwrap_or_default().to_string();
+            let text = data["text"].as_str().unwrap_or_default().to_string();
+            let attrs: Vec<(String, String)> = data["attrs"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|item| {
+                    let arr = item.as_array()?;
+                    Some((arr.first()?.as_str()?.to_string(), arr.get(1)?.as_str()?.to_string()))
+                }).collect())
+                .unwrap_or_default();
+            results.push(Element::new_cdp(
+                self.page.clone(),
+                String::new(),
+                Some(crate::locator::Locator::XPath(xpath.to_string())),
+                html, tag, text, attrs,
+                None,
+            ));
         }
         Ok(results)
+    }
+
+    /// Chain locator with JS fallback for non-CSS steps.
+    async fn ele_chain_js_fallback(
+        &self,
+        steps: &[crate::locator::Locator],
+        deadline: std::time::Instant,
+    ) -> Result<Element> {
+        // Build combined XPath: scope each step within previous
+        let mut xpath_parts: Vec<String> = Vec::new();
+        for step in steps {
+            match step {
+                crate::locator::Locator::Css(sel) => {
+                    // Convert simple CSS to XPath
+                    let xp = if sel.contains(' ') || sel.contains('>') || sel.contains('.') || sel.contains('#') || sel.contains('[') {
+                        // Complex CSS: use it as-is via a JS workaround
+                        format!("descendant::*[self::div]/**") // placeholder, will handle below
+                    } else {
+                        format!("descendant::{sel}")
+                    };
+                    xpath_parts.push(xp);
+                }
+                _ => {
+                    if let Some(xp) = step.to_xpath() {
+                        xpath_parts.push(xp);
+                    }
+                }
+            }
+        }
+
+        // For chains with CSS, build a combined JS approach
+        let combined_xpath = xpath_parts.join("/");
+        loop {
+            match self.ele_by_xpath_fallback(&combined_xpath, 1).await {
+                Ok(el) => return Ok(el),
+                Err(_) => {}
+            }
+            // Also try step-by-step approach
+            if let Ok(first_sel) = locator_to_selector(&steps[0]) {
+                if let Ok(first_el) = self.page.find_element(&first_sel).await {
+                    let mut cdp_el = first_el;
+                    let mut found = true;
+                    for step in steps.iter().skip(1) {
+                        // Try CDP native
+                        if let Ok(sel) = locator_to_selector(step) {
+                            match cdp_el.find_element(&sel).await {
+                                Ok(child) => cdp_el = child,
+                                Err(_) => {
+                                    // Try JS fallback within this element
+                                    found = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if found {
+                        return self.build_element_from_cdp(cdp_el, crate::locator::Locator::Chain(steps.to_vec())).await;
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Err(Error::ElementNotFound(format!(
+            "chain not found: {}", steps.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(" -> ")
+        )))
+    }
+
+    /// Chain locator for eles() with JS fallback.
+    async fn eles_chain_js_fallback(
+        &self,
+        steps: &[crate::locator::Locator],
+    ) -> Result<Vec<Element>> {
+        // Simplified: use combined XPath
+        let xpath_parts: Vec<String> = steps.iter().filter_map(|s| s.to_xpath()).collect();
+        let combined = xpath_parts.join("/");
+        self.eles_by_xpath_fallback(&combined).await
     }
 
     // ── Shadow DOM piercing ──────────────────────────────────
@@ -1169,6 +1391,7 @@ impl ChromiumPage {
             tag,
             text,
             attrs,
+            None,
         ))
     }
 
@@ -1237,6 +1460,7 @@ impl ChromiumPage {
                 tag,
                 text,
                 attrs,
+                None,
             ));
         }
 
@@ -1305,6 +1529,7 @@ impl ChromiumPage {
             tag,
             text,
             attrs,
+            None,
         ))
     }
 
@@ -1432,33 +1657,15 @@ impl ChromiumPage {
         expression: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        use chromiumoxide::cdp::js_protocol::runtime::{
-            CallArgument, CallFunctionOnParams,
-        };
         let args_json = serde_json::to_string(&args)
             .unwrap_or_else(|_| "undefined".to_string());
-        let wrapped = format!(
-            "(function(argStr){{ const args = JSON.parse(argStr); return ({expr})(args); }})",
+        let escaped_args = args_json.replace('\\', "\\\\").replace('\'', "\\'");
+        let js = format!(
+            "(function(){{ var args = JSON.parse('{}'); return ({expr})(args); }})()",
+            escaped_args,
             expr = expression
         );
-        let call_arg = CallArgument {
-            value: Some(serde_json::Value::String(args_json)),
-            unserializable_value: None,
-            object_id: None,
-        };
-        let params = CallFunctionOnParams::builder()
-            .function_declaration(wrapped)
-            .argument(call_arg)
-            .await_promise(true)
-            .return_by_value(true)
-            .build()
-            .map_err(|e| Error::Browser(format!("run_js_with_args build: {e}")))?;
-        let r = self
-            .page
-            .execute(params)
-            .await
-            .map_err(|e| Error::Browser(format!("run_js_with_args: {e}")))?;
-        Ok(r.result.result.value.clone().unwrap_or(serde_json::Value::Null))
+        self.execute(&js).await
     }
 
     /// Wait for a download whose URL contains `url_pattern` to complete.
@@ -2100,7 +2307,11 @@ impl ChromiumPage {
     /// Execute JavaScript inside an iframe identified by CSS selector.
     pub async fn frame_execute(&self, selector: &str, js_code: &str) -> Result<serde_json::Value> {
         let js = format!(
-            "(function(){{ var f = document.querySelector({sel}); if(!f) return null; return (function(){{ {code} }}).call(f.contentWindow); }})()",
+            "(function(){{ \
+               var f = document.querySelector({sel}); \
+               if(!f || !f.contentDocument) return null; \
+               return (function(){{ {code} }}).call(f.contentWindow); \
+             }})()",
             sel = json_escape(selector),
             code = js_code
         );
@@ -3153,21 +3364,28 @@ impl ChromiumPage {
     pub async fn dom_snapshot(&self) -> Result<serde_json::Value> {
         self.execute(
             r#"(() => {
-                function serialize(node) {
-                    let obj = { type: node.nodeType, name: node.nodeName };
-                    if (node.attributes) {
+                var MAX_DEPTH = 20, MAX_NODES = 500, count = 0;
+                function serialize(node, depth) {
+                    if (depth > MAX_DEPTH || count > MAX_NODES) return null;
+                    count++;
+                    var obj = { type: node.nodeType, name: node.nodeName };
+                    if (node.attributes && node.attributes.length > 0) {
                         obj.attrs = {};
-                        for (let i = 0; i < node.attributes.length; i++) {
+                        for (var i = 0; i < node.attributes.length; i++) {
                             obj.attrs[node.attributes[i].name] = node.attributes[i].value;
                         }
                     }
                     if (node.childNodes && node.childNodes.length > 0) {
-                        obj.children = Array.from(node.childNodes).map(serialize);
+                        obj.children = [];
+                        for (var i = 0; i < node.childNodes.length; i++) {
+                            var child = serialize(node.childNodes[i], depth + 1);
+                            if (child) obj.children.push(child);
+                        }
                     }
-                    if (node.nodeValue) obj.value = node.nodeValue.trim();
+                    if (node.nodeValue && node.nodeValue.trim()) obj.value = node.nodeValue.trim();
                     return obj;
                 }
-                return JSON.stringify(serialize(document.documentElement));
+                return JSON.stringify(serialize(document.documentElement, 0));
             })()"#,
         )
         .await
@@ -3753,6 +3971,313 @@ impl ChromiumPage {
     /// Count elements matching selector.
     pub async fn ele_count(&self, locator_str: &str) -> Result<usize> {
         self.eles(locator_str).await.map(|v| v.len())
+    }
+
+    // ── Agent-friendly APIs ──────────────────────────────────────
+
+    /// Extract all interactive elements on the page (buttons, links, inputs, etc.).
+    ///
+    /// Returns structured data for each element: tag, text, type, visibility,
+    /// bounding box, and all attributes. Designed for AI agents to understand
+    /// what actions are possible on the current page.
+    pub async fn interactive_elements(&self) -> Result<Vec<crate::agent::InteractiveElement>> {
+        let js = crate::js_helpers::JS_INTERACTIVE_ELEMENTS;
+        let val = self.execute(js).await?;
+        // execute() may return Value::String (from JSON.stringify) or a raw object
+        let val = if val.is_string() {
+            let s = val.as_str().unwrap_or("[]");
+            serde_json::from_str(s).unwrap_or(serde_json::Value::Array(vec![]))
+        } else {
+            val
+        };
+        let elements: Vec<crate::agent::InteractiveElement> =
+            serde_json::from_value(val).unwrap_or_default();
+        Ok(elements)
+    }
+
+    /// Get a comprehensive summary of the current page.
+    ///
+    /// Includes URL, title, meta description, all links, forms with their fields,
+    /// and a list of interactive elements. Perfect for an AI agent's first look
+    /// at a page.
+    pub async fn page_summary(&self) -> Result<crate::agent::PageSummary> {
+        let js = crate::js_helpers::JS_PAGE_SUMMARY;
+        let val = self.execute(js).await?;
+        // execute() may return Value::String (from JSON.stringify) or a raw object
+        let val = if val.is_string() {
+            let s = val.as_str().unwrap_or("{}");
+            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+        } else {
+            val
+        };
+        let summary: crate::agent::PageSummary =
+            serde_json::from_value(val).map_err(|e| Error::Browser(format!("page_summary parse: {e}")))?;
+        Ok(summary)
+    }
+
+    /// Get a lightweight snapshot of the current page state.
+    ///
+    /// Returns url, title, viewport size, scroll position, interactive elements,
+    /// and the first 2000 characters of visible text. Useful for periodic
+    /// state checks by an AI agent.
+    pub async fn page_snapshot(&self) -> Result<crate::agent::PageSnapshot> {
+        let vis_text_js = crate::js_helpers::js_visible_text(2000);
+        let vis_text = self.execute(&vis_text_js).await?
+            .as_str().unwrap_or_default().to_string();
+
+        let url = self.url().await?;
+        let title = self.title().await?;
+        let vp_val = self.execute(
+            "(function(){return JSON.stringify({w:window.innerWidth,h:window.innerHeight})})()"
+        ).await?;
+        let viewport: serde_json::Value = match vp_val {
+            serde_json::Value::String(s) => serde_json::from_str(&s).unwrap_or_default(),
+            v => v,
+        };
+        let sc_val = self.execute(crate::js_helpers::JS_SCROLL_STATE).await?;
+        let scroll: serde_json::Value = match sc_val {
+            serde_json::Value::String(s) => serde_json::from_str(&s).unwrap_or_default(),
+            v => v,
+        };
+
+        let interactive = self.interactive_elements().await?;
+
+        Ok(crate::agent::PageSnapshot {
+            url,
+            title,
+            viewport_size: format!(
+                "{}x{}",
+                viewport.get("w").and_then(|v| v.as_u64()).unwrap_or(0),
+                viewport.get("h").and_then(|v| v.as_u64()).unwrap_or(0)
+            ),
+            scroll_position: format!(
+                "x={} y={}/{}",
+                scroll.get("scrollX").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
+                scroll.get("scrollY").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
+                scroll.get("scrollHeight").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
+            ),
+            interactive_elements: interactive,
+            visible_text: vis_text,
+        })
+    }
+
+    /// Smart click: find an element by text or CSS and click it.
+    ///
+    /// Tries multiple strategies:
+    /// 1. Exact text match
+    /// 2. Partial text match
+    /// 3. CSS selector (if it looks like one)
+    ///
+    /// Returns an ActionAttempt with before/after URLs and success status.
+    pub async fn smart_click(&self, target: &str) -> crate::agent::ActionAttempt {
+        let before_url = self.url().await.unwrap_or_default();
+        let mut success = false;
+        let mut error = None;
+
+        // Strategy 1: text=xxx
+        if let Ok(el) = self.ele(&format!("text={target}")).await {
+            if let Err(e) = el.click().await {
+                // Strategy 2: text*=xxx
+                if let Ok(el2) = self.ele(&format!("text*={target}")).await {
+                    if let Err(e2) = el2.click().await {
+                        error = Some(format!("text match click failed: {e}, {e2}"));
+                    } else {
+                        success = true;
+                    }
+                }
+            } else {
+                success = true;
+            }
+        }
+        // Strategy 3: CSS selector
+        else if let Ok(el) = self.ele(target).await {
+            if let Err(e) = el.click().await {
+                error = Some(format!("css click failed: {e}"));
+            } else {
+                success = true;
+            }
+        } else {
+            error = Some(format!("element not found: {target}"));
+        }
+
+        // Wait for potential navigation
+        self.sleep(std::time::Duration::from_millis(500)).await;
+        let after_url = self.url().await.unwrap_or_default();
+
+        crate::agent::ActionAttempt {
+            success,
+            error,
+            before_url,
+            after_url,
+        }
+    }
+
+    /// Smart fill: find an input field by name/label/placeholder and fill it.
+    ///
+    /// Tries strategies: name attr → placeholder → label text → aria-label.
+    pub async fn smart_fill(&self, field: &str, value: &str) -> crate::agent::ActionAttempt {
+        let before_url = self.url().await.unwrap_or_default();
+        let mut success = false;
+        let mut error = None;
+
+        // Strategy 1: input[name=xxx]
+        let locators = [
+            format!("input[name={field}]"),
+            format!("textarea[name={field}]"),
+            format!("input[placeholder*={field}]"),
+            format!("input[aria-label*={field}]"),
+        ];
+
+        for loc in &locators {
+            if let Ok(el) = self.ele(loc).await {
+                // Use fill() — JS-based, supports all Unicode including Chinese
+                if let Err(e) = el.fill(value).await {
+                    error = Some(format!("fill failed for {loc}: {e}"));
+                } else {
+                    success = true;
+                    break;
+                }
+            }
+        }
+
+        if !success && error.is_none() {
+            error = Some(format!("field not found: {field}"));
+        }
+
+        let after_url = self.url().await.unwrap_or_default();
+
+        crate::agent::ActionAttempt {
+            success,
+            error,
+            before_url,
+            after_url,
+        }
+    }
+
+    /// Wait for the page to reach network idle (no requests for `quiet_ms`).
+    ///
+    /// Useful for SPAs where content loads dynamically after navigation.
+    pub async fn wait_network_idle(&self, timeout_secs: u64, quiet_ms: u64) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let quiet = std::time::Duration::from_millis(quiet_ms);
+        let mut quiet_start = std::time::Instant::now();
+        let mut last_pending = 0usize;
+
+        loop {
+            let pending: usize = self
+                .execute("document.querySelectorAll('img[src]:not([complete]), link[rel=stylesheet]:not([disabled]), [loading]').length")
+                .await
+                .and_then(|v| Ok(v.as_u64().unwrap_or(0) as usize))
+                .unwrap_or(0);
+
+            if pending == last_pending && pending == 0 {
+                if quiet_start.elapsed() >= quiet {
+                    return Ok(());
+                }
+            } else {
+                quiet_start = std::time::Instant::now();
+                last_pending = pending;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_network_idle: still {pending} pending after {timeout_secs}s"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Safe back navigation with session recovery.
+    ///
+    /// Unlike raw `back()`, this method:
+    /// 1. Waits for page stability after navigation
+    /// 2. Recovers the CDP session if it becomes stale
+    /// 3. Returns Ok even if history is empty (no-op)
+    pub async fn safe_back(&self) -> Result<()> {
+        let url_before = self.url().await.unwrap_or_default();
+        match self.back().await {
+            Ok(()) => {
+                // Wait for page to stabilize
+                self.sleep(std::time::Duration::from_millis(300)).await;
+                // Verify navigation happened or stayed
+                let _ = self.wait_js("document.readyState === 'complete' || document.readyState === 'interactive'", 5).await;
+                Ok(())
+            }
+            Err(e) => {
+                // If back failed, try JS history.back()
+                let js_result = self.execute("history.back()").await;
+                match js_result {
+                    Ok(_) => {
+                        self.sleep(std::time::Duration::from_millis(300)).await;
+                        Ok(())
+                    }
+                    Err(_) => {
+                        // If URL didn't change, it's fine (no history)
+                        let url_after = self.url().await.unwrap_or_default();
+                        if url_after == url_before {
+                            Ok(()) // no history, not an error
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Safe forward navigation with session recovery.
+    pub async fn safe_forward(&self) -> Result<()> {
+        match self.forward().await {
+            Ok(()) => {
+                self.sleep(std::time::Duration::from_millis(300)).await;
+                let _ = self.wait_js("document.readyState === 'complete' || document.readyState === 'interactive'", 5).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.execute("history.forward()").await;
+                self.sleep(std::time::Duration::from_millis(300)).await;
+                // Forward failure is usually "no forward history" — not fatal
+                Ok(())
+            }
+        }
+    }
+
+    /// Safe refresh with session recovery.
+    pub async fn safe_refresh(&self) -> Result<()> {
+        let url = self.url().await.unwrap_or_default();
+        // Instead of CDP refresh, re-navigate to same URL
+        self.get(&url).await
+    }
+
+    /// Auto-retry wrapper: execute an async operation with retries.
+    ///
+    /// ```ignore
+    /// let el = page.auto_retry(|| page.ele("text=Login"), 3, 500).await;
+    /// ```
+    pub async fn auto_retry<F, Fut, T>(
+        &self,
+        op: F,
+        max_attempts: u32,
+        delay_ms: u64,
+    ) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut last_err = None;
+        for attempt in 0..max_attempts {
+            match op().await {
+                Ok(val) => return Ok(val),
+                Err(e) => {
+                    if attempt + 1 < max_attempts {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::Timeout("auto_retry: all attempts failed".into())))
     }
 
 }

@@ -7,4 +7,7 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 screenshots/
-screenshots/
+*.png
+*.pdf
+*.html
+!examples/*.html

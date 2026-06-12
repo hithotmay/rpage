@@ -1,6 +1,6 @@
 # rpage 🦀🌐
 
-> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**568 个公开方法，11,599 行 Rust**。
+> Rust 版 DrissionPage — 浏览器自动化 + HTTP 会话 + Cookie 互通，三合一。**580+ 公开方法，12,000+ 行 Rust**。
 
 `rpage` 是一个受 [DrissionPage](https://github.com/g1879/DrissionPage) 启发的 Rust 浏览器自动化库。
 
@@ -42,6 +42,9 @@
 - **Init Script** — 页面加载前注入 JS
 - **CSS 注入** — 动态注入/移除 CSS 样式
 - **灵活配置** — 环境变量 `RPAGE_CHROME_PATH`，PATH 搜索，标准路径
+- **同步 API** — `SyncPage` 零 await 封装，`SyncPage::connect()` 一步到位
+- **Agent 智能接口** — `interactive_elements()`/`page_snapshot()`/`smart_click()`/`smart_fill()` 直接给 AI Agent 用
+- **JS XPath 回退** — 非 CSS 定位器（`text:`/`tag:`）自动回退 XPath
 
 ## 🚀 快速开始
 
@@ -69,6 +72,70 @@ async fn main() -> rpage::Result<()> {
 page.goto("https://www.baidu.com").await?
     .type_text("#kw", "rust教程").await?
     .click_ele("#su").await?;
+```
+
+### 同步 API — 零 await，零 tokio
+
+`SyncPage` 将全部 async API 封装为同步调用，无需 `#[tokio::main]`：
+
+```rust
+use rpage::sync::SyncPage;
+
+fn main() -> rpage::Result<()> {
+    let p = SyncPage::connect("http://127.0.0.1:9222")?;  // 连接已有 Chrome
+
+    p.get("https://httpbin.org/forms/post")?;
+    p.type_text("input[name='custname']", "张三")?;
+    p.click_ele("input[value='medium']")?;
+    p.screenshot("form.png")?;
+
+    let title = p.title()?;
+    let cookies = p.cookies()?;
+    let links = p.links()?;
+    println!("title={}, {} cookies, {} links", title, cookies.len(), links.len());
+    Ok(())
+}
+```
+
+### Agent 智能接口 — 为 AI Agent 设计
+
+```rust
+// 1. 分析页面交互元素
+let elements = p.interactive_elements()?;
+for el in &elements {
+    println!("{:?} {} type={:?}", el.tag, el.text, el.input_type);
+}
+
+// 2. 页面快照（给 LLM 上下文）
+let snap = p.page_snapshot()?;
+// snap.url, snap.title, snap.viewport_size, snap.interactive_elements, snap.visible_text
+
+// 3. 智能操作 — 用自然语言描述即可
+let result = p.smart_click("提交");
+let result = p.smart_fill("用户名", "agent_bot");
+
+// 4. DOM 快照（结构化 JSON）
+let dom = p.dom_snapshot()?;
+
+// 5. 性能指标
+let metrics = p.performance_metrics()?;
+```
+
+### 能力展示
+
+运行 `cargo run --example showcase` 查看 **10 大场景 50+ 项操作** 的完整演示：
+
+```
+ 1. 页面导航 & DOM 操作     — 导航、表单填写、复选框/单选框、截图
+ 2. JavaScript 执行         — execute、run_async_js、run_js_with_args、全局注入
+ 3. 元素高级操作            — DOM 树遍历、属性/样式操作、拖拽
+ 4. 多标签页管理            — new_tab、switch_to_tab、跨标签导航
+ 5. Cookie 管理             — 读取、设置、删除、跨请求验证
+ 6. 网络控制                — UA伪装、自定义Headers、URL屏蔽
+ 7. 截图 & PDF              — 全页截图、元素截图、PDF生成
+ 8. 智能等待                — wait_ele、wait_js、wait_url_contains
+ 9. 设备模拟 & 视口         — viewport、device_scale、touch、geolocation、timezone
+10. Agent 智能接口          — interactive_elements、page_snapshot、smart_click/fill
 ```
 
 ## 📦 安装
@@ -574,15 +641,18 @@ page.options();           // Option<&ChromiumOptions>
 ## 项目结构
 
 ```
-rpage/  (11,599 行 Rust, 568 方法)
+rpage/  (12,000+ 行 Rust, 580+ 方法)
 ├── src/
-│   ├── chromium_page.rs  # CDP 浏览器控制 (190+ 方法)
+│   ├── chromium_page.rs  # CDP 浏览器控制 (190+ 方法) + Agent 接口
 │   ├── element.rs        # 元素操作 (100+ 方法 + ElementBatch + Wait)
+│   ├── sync.rs           # SyncPage 同步封装 (100+ 方法)
+│   ├── agent.rs          # Agent 数据结构 (InteractiveElement/PageSnapshot/ActionAttempt)
+│   ├── js_helpers.rs     # JS 代码片段 (XPath 回退/DOM 遍历等)
 │   ├── web_page.rs       # 统一双模式页 (120+ 方法)
 │   ├── session_page.rs   # HTTP 会话 (25+ 方法)
 │   ├── download.rs       # 下载管理 (13 方法)
 │   ├── network.rs        # 网络监控 + 实时监听 + 监听模式 (20 方法)
-│   ├── locator.rs        # 定位器解析 (6 方法)
+│   ├── locator.rs        # 定位器解析 + XPath 回退 (6 方法)
 │   ├── config.rs         # 配置 (24 方法)
 │   ├── stealth.rs        # 反检测 (5 方法)
 │   ├── cookie-hub.rs     # Cookie 同步 + 文件 (10 方法)
@@ -592,7 +662,8 @@ rpage/  (11,599 行 Rust, 568 方法)
 │   ├── error.rs          # 错误类型
 │   ├── prelude.rs        # 预导入
 │   └── lib.rs            # 入口
-├── examples/             # 12 个示例
+├── examples/
+│   └── showcase.rs       # 能力展示：10 大场景 50+ 项操作
 └── tests/                # 145 个测试
 ```
 

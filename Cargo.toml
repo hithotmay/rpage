@@ -44,3 +44,15 @@ path = "examples/switch_mode.rs"
 [[example]]
 name = "listen_network"
 path = "examples/listen_network.rs"
+
+[[example]]
+name = "capability_demo"
+path = "examples/capability_demo.rs"
+
+[[example]]
+name = "full_showcase"
+path = "examples/full_showcase.rs"
+
+[[example]]
+name = "sync_demo"
+path = "examples/sync_demo.rs"
