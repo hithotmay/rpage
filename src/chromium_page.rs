@@ -297,6 +297,40 @@ pub struct ChromiumPage {
     load_strategy: String,
     /// Whether the high-level listen mode (DrissionPage-style) is active.
     listening: Arc<Mutex<bool>>,
+    /// The spawned Chrome child process, if this ChromiumPage *launched* Chrome.
+    /// `None` when connected via `connect()`/`connect_with_opts()` to an
+    /// already-running browser (we don't own that process).
+    ///
+    /// On Drop we kill this child to avoid orphaned Chrome processes, since
+    /// Windows spawns it with `DETACHED_PROCESS` and Rust's default `Child`
+    /// drop does not terminate detached children.
+    child: std::sync::Mutex<Option<std::process::Child>>,
+}
+
+impl Drop for ChromiumPage {
+    /// Clean up the spawned Chrome child process if we own it.
+    ///
+    /// rpage launches Chrome with `DETACHED_PROCESS` on Windows, so Rust's
+    /// default `Child` drop (which kills on drop) does **not** fire — the
+    /// handle simply goes out of scope and Chrome keeps running as an orphan.
+    /// This Drop closes that gap: if `self.child` holds a process we spawned,
+    /// we hard-kill it and reap the zombie.
+    ///
+    /// Prefer calling `.quit().await` for graceful (CDP-level) shutdown; this
+    /// Drop is a safety net for the "user forgot / panic / early return" case.
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                // Best-effort kill. Ignore errors: the process may already be gone
+                // (e.g. quit() already closed it, or it crashed).
+                let _ = child.kill();
+                let _ = child.wait(); // reap to avoid zombie
+                debug!("ChromiumPage::drop killed owned Chrome child");
+            }
+        }
+        // If child was None, we connected to an external browser we don't own —
+        // leave it running (the external owner manages its lifetime).
+    }
 }
 
 impl ChromiumPage {
@@ -321,6 +355,21 @@ impl ChromiumPage {
     ///
     /// 因为不走 chromiumoxide 的 `Browser::launch`（它会加 `--enable-automation` 等
     /// 默认参数），所以浏览器没有任何自动化标记，和用户手动打开的完全一样。
+    ///
+    /// # 行为约定（重要）
+    /// `new()` 始终以**有头模式**启动（显示浏览器窗口），使用每次进程独立的
+    /// 临时 user-data-dir，固定端口 `9222`。这是为了交互式/调试场景的"开箱即用"。
+    ///
+    /// 如果你需要 headless、自定义端口、持久化 profile 等生产环境配置，
+    /// 请改用 [`with_options`](Self::with_options)：
+    /// ```ignore
+    /// use rpage::config::ChromiumOptions;
+    /// let page = ChromiumPage::with_options(
+    ///     ChromiumOptions::builder().headless(true).debug_port(19222).build()
+    /// ).await?;
+    /// ```
+    /// 注意 `ChromiumOptions::default()` 是 headless，与 `new()` 相反——这是
+    /// 为了让 `new()` 保持"可视化调试"的语义，而 `with_options` 默认走生产路径。
     pub async fn new() -> Result<Self> {
         let chrome_path = find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?;
         // Use a unique user-data-dir per PID to prevent Chrome from merging
@@ -333,7 +382,7 @@ impl ChromiumPage {
             Some(&ud),
             port,
             &[],
-            false,       // headless = false, show browser window
+            false,       // headless = false, show browser window (see doc above)
             None,
             true,
             false,
@@ -514,14 +563,31 @@ impl ChromiumPage {
                 }
             }
 
-            // Wait for debug port to be ready
-            Self::wait_for_port(debug_url.clone()).await?;
+            // Wait for debug port to be ready. If this or the connect step
+            // below fails, we must kill the child we just spawned to avoid
+            // leaving an orphaned Chrome process behind (Windows DETACHED_PROCESS
+            // children survive their parent by default).
+            if let Err(e) = Self::wait_for_port(debug_url.clone()).await {
+                let _ = child.kill();
+                return Err(e);
+            }
+
+            // Connect via CDP. On failure, clean up the spawned child.
+            let page = match Self::connect_with_opts(&debug_url, opts).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = child.kill();
+                    return Err(e);
+                }
+            };
+            // Record ownership so Drop can clean up later.
+            *page.child.lock().unwrap() = Some(child);
+            Ok(page)
         } else {
             info!("Browser already running on port {port}, reusing");
+            // Reusing an external browser — no child to own.
+            Self::connect_with_opts(&debug_url, opts).await
         }
-
-        // Connect via CDP
-        Self::connect_with_opts(&debug_url, opts).await
     }
 
     /// Poll the debug port until Chrome is ready (max 10s).
@@ -881,6 +947,9 @@ impl ChromiumPage {
             init_script_ids: Arc::new(Mutex::new(HashMap::new())),
             load_strategy: "normal".into(),
             listening: Arc::new(Mutex::new(false)),
+            // connect_with_opts attaches to an external browser; we do not own
+            // the process. Set when launch_and_connect spawns Chrome itself.
+            child: std::sync::Mutex::new(None),
         })
     }
 
@@ -1006,13 +1075,35 @@ impl ChromiumPage {
     ///
     /// Tries to fetch `/json/version` from the saved debug URL.
     /// Returns `true` if the browser responds, `false` otherwise.
+    ///
+    /// **This is a blocking call** (uses `reqwest::blocking`). Inside a tokio
+    /// runtime it will stall a worker thread for the duration of the HTTP
+    /// request. Prefer [`is_connected_async`](Self::is_connected_async) in any
+    /// async context. The sync version is retained for non-async callers and
+    /// diagnostic scripts.
     pub fn is_connected(&self) -> bool {
-        // Synchronous check: use a minimal HTTP request via reqwest blocking.
-        // Since reqwest::blocking might not be available, we do a quick
-        // websocket-level check by seeing if the browser inner is still valid.
-        // The simplest reliable way: try an HTTP GET to the debug URL.
+        // Synchronous check via reqwest::blocking. See the doc warning above:
+        // do not call from an async task without spawn_blocking.
         let url = format!("{}/json/version", self.debug_url);
         reqwest::blocking::get(&url).is_ok()
+    }
+
+    /// Async version of [`is_connected`](Self::is_connected).
+    ///
+    /// Safe to call from within a tokio runtime. Uses the async reqwest client
+    /// so it never blocks a worker thread.
+    pub async fn is_connected_async(&self) -> bool {
+        let url = format!("{}/json/version", self.debug_url);
+        // Reuse a short-timeout client so a dead browser fails fast rather than
+        // hanging on the default connect timeout.
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        client.get(&url).send().await.is_ok()
     }
 
     /// Reconnect to the browser using the saved debug URL.
@@ -1022,15 +1113,18 @@ impl ChromiumPage {
     /// was lost but the browser is still running.
     pub async fn reconnect(&mut self) -> Result<()> {
         info!("Reconnecting to browser at {}", self.debug_url);
-        let new = Self::connect(&self.debug_url).await?;
-        self.browser = new.browser;
-        self.set_page(new.page.lock().unwrap().clone());
-        self.download_manager = new.download_manager;
-        self.network_monitor = new.network_monitor;
-        self.console_monitor = new.console_monitor;
-        self.ws_monitor = new.ws_monitor;
-        self.init_scripts = new.init_scripts;
-        self.init_script_ids = new.init_script_ids;
+        let mut new = Self::connect(&self.debug_url).await?;
+        // Preserve the owned child process: the browser process hasn't changed,
+        // only our CDP connection has. `new` came from connect() so new.child is
+        // None; swap our real child into `new`, then swap the whole struct so
+        // we can't move out of a Drop type field-by-field.
+        std::mem::swap(
+            &mut *self.child.lock().unwrap(),
+            &mut *new.child.lock().unwrap(),
+        );
+        std::mem::swap(self, &mut new);
+        // `new` (now holding the stale connection) is dropped here; its Drop
+        // sees child == None and does not kill the still-running browser.
         Ok(())
     }
 
@@ -2360,14 +2454,31 @@ impl ChromiumPage {
     // ── Browser lifecycle ───────────────────────────────────
 
     /// Quit the browser entirely (kills Chrome process).
+    ///
+    /// Issues a graceful CDP `Browser.close` and, if we spawned Chrome ourselves,
+    /// reaps the child process. After this returns, `Drop` will find no child
+    /// to kill (idempotent shutdown).
     pub async fn quit(&self) -> Result<()> {
         // Use CDP Browser.close to gracefully shut down
         use chromiumoxide::cdp::browser_protocol::browser::CloseParams;
-        self.page()
+        let close_result = self
+            .page()
             .execute(CloseParams::default())
             .await
-            .map_err(|e| Error::Browser(format!("quit: {e}")))?;
-        Ok(())
+            .map(|_| ()) // discard CommandResponse; success is all we care about
+            .map_err(|e| Error::Browser(format!("quit: {e}")));
+
+        // Whether or not the CDP close succeeded, reap the child we own so
+        // there is no orphan. Drop::drop would also do this, but doing it here
+        // lets us report the real exit status and avoids a race where CDP
+        // close + Drop kill interleave.
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        close_result
     }
 
     // ── Scroll ──────────────────────────────────────────────
