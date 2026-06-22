@@ -417,8 +417,12 @@ fn find_element_in_doc(doc: &Html, locator: &Locator) -> Result<Element> {
         Locator::XPath(_)
         | Locator::Text(_)
         | Locator::TextContains(_)
+        | Locator::TextStartsWith(_)
+        | Locator::TextEndsWith(_)
         | Locator::AttrEquals { .. }
-        | Locator::AttrContains { .. } => {
+        | Locator::AttrContains { .. }
+        | Locator::AttrStartsWith { .. }
+        | Locator::AttrEndsWith { .. } => {
             let xpath = locator
                 .to_xpath()
                 .ok_or_else(|| Error::InvalidLocator("cannot convert to XPath".into()))?;
@@ -451,8 +455,12 @@ fn find_elements_in_doc(doc: &Html, locator: &Locator) -> Result<Vec<Element>> {
         Locator::XPath(_)
         | Locator::Text(_)
         | Locator::TextContains(_)
+        | Locator::TextStartsWith(_)
+        | Locator::TextEndsWith(_)
         | Locator::AttrEquals { .. }
-        | Locator::AttrContains { .. } => {
+        | Locator::AttrContains { .. }
+        | Locator::AttrStartsWith { .. }
+        | Locator::AttrEndsWith { .. } => {
             let xpath = locator
                 .to_xpath()
                 .ok_or_else(|| Error::InvalidLocator("cannot convert to XPath".into()))?;

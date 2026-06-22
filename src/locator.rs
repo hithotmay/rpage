@@ -1,15 +1,18 @@
 //! Locator parsing and matching
 //!
-//! Supported locator syntax:
+//! Supported locator syntax (text/attribute operators follow DrissionPage:
+//! `=` exact, `:` contains, `^` starts-with, `$` ends-with):
 //! - `#id` → Css("#id")
 //! - `.class` → Css(".class")
 //! - `tag` → Css("tag")
 //! - `css:xxx` → Css("xxx")
 //! - `xpath:xxx` → XPath("xxx")
-//! - `text=xxx` → Text("xxx")
-//! - `text*=xxx` → TextContains("xxx")
-//! - `@attr=val` → AttrEquals("attr", "val")
-//! - `@attr*=val` → AttrContains("attr", "val")
+//! - `text=xxx` → Text exact
+//! - `text:xxx` / `text*=xxx` → TextContains
+//! - `text^xxx` → TextStartsWith, `text$xxx` → TextEndsWith
+//! - `@attr=val` → AttrEquals
+//! - `@attr:val` / `@attr*=val` → AttrContains
+//! - `@attr^val` → AttrStartsWith, `@attr$val` → AttrEndsWith
 //! - `tag:form@@text=Login` → Chain([Css("form"), Text("Login")])
 
 use crate::error::{Error, Result};
@@ -25,10 +28,18 @@ pub enum Locator {
     Text(String),
     /// Text contains match
     TextContains(String),
+    /// Text starts-with match
+    TextStartsWith(String),
+    /// Text ends-with match
+    TextEndsWith(String),
     /// Attribute equals value
     AttrEquals { attr: String, value: String },
     /// Attribute contains value
     AttrContains { attr: String, value: String },
+    /// Attribute starts-with value
+    AttrStartsWith { attr: String, value: String },
+    /// Attribute ends-with value
+    AttrEndsWith { attr: String, value: String },
     /// Chained locators (narrow down step by step)
     Chain(Vec<Locator>),
 }
@@ -38,15 +49,18 @@ impl Locator {
     pub fn to_css(&self) -> Option<String> {
         match self {
             Locator::Css(s) => Some(s.clone()),
-            Locator::Text(_t) => {
-                // XPath only, no direct CSS equivalent for exact text
-                None
-            }
-            Locator::TextContains(_) => None,
-            Locator::XPath(_) => None,
-            Locator::AttrEquals { .. } => None,
-            Locator::AttrContains { .. } => None,
-            Locator::Chain(_) => None,
+            // Text / attribute fuzzy matches have no direct CSS equivalent —
+            // they all go through the XPath fallback.
+            Locator::Text(_)
+            | Locator::TextContains(_)
+            | Locator::TextStartsWith(_)
+            | Locator::TextEndsWith(_)
+            | Locator::XPath(_)
+            | Locator::AttrEquals { .. }
+            | Locator::AttrContains { .. }
+            | Locator::AttrStartsWith { .. }
+            | Locator::AttrEndsWith { .. }
+            | Locator::Chain(_) => None,
         }
     }
 
@@ -74,6 +88,17 @@ impl Locator {
                 "//*[contains(text(),'{}')]",
                 t.replace('\'', "\\'")
             )),
+            Locator::TextStartsWith(t) => Some(format!(
+                "//*[starts-with(text(),'{}')]",
+                t.replace('\'', "\\'")
+            )),
+            // XPath 1.0 has no ends-with(); emulate it with substring().
+            Locator::TextEndsWith(t) => {
+                let t = t.replace('\'', "\\'");
+                Some(format!(
+                    "//*[substring(text(),string-length(text())-string-length('{t}')+1)='{t}']"
+                ))
+            }
             Locator::AttrEquals { attr, value } => {
                 Some(format!("//*[@{}='{}']", attr, value.replace('\'', "\\'")))
             }
@@ -82,6 +107,17 @@ impl Locator {
                 attr,
                 value.replace('\'', "\\'")
             )),
+            Locator::AttrStartsWith { attr, value } => Some(format!(
+                "//*[starts-with(@{},'{}')]",
+                attr,
+                value.replace('\'', "\\'")
+            )),
+            Locator::AttrEndsWith { attr, value } => {
+                let value = value.replace('\'', "\\'");
+                Some(format!(
+                    "//*[substring(@{attr},string-length(@{attr})-string-length('{value}')+1)='{value}']"
+                ))
+            }
             Locator::Chain(locators) => {
                 // Build a combined XPath from chain
                 let mut parts = Vec::new();
@@ -109,8 +145,12 @@ impl Locator {
             Locator::XPath(_)
                 | Locator::Text(_)
                 | Locator::TextContains(_)
+                | Locator::TextStartsWith(_)
+                | Locator::TextEndsWith(_)
                 | Locator::AttrEquals { .. }
                 | Locator::AttrContains { .. }
+                | Locator::AttrStartsWith { .. }
+                | Locator::AttrEndsWith { .. }
         )
     }
 }
@@ -150,6 +190,40 @@ pub fn parse_locator(input: &str) -> Result<Locator> {
     parse_single_locator(input)
 }
 
+/// A text/attribute match operator, following DrissionPage conventions:
+/// `=` exact, `:` contains, `^` starts-with, `$` ends-with. `*=` is kept as a
+/// legacy alias for contains, and `^=`/`$=` as aliases for `^`/`$`.
+#[derive(Clone, Copy)]
+enum MatchOp {
+    Exact,
+    Contains,
+    StartsWith,
+    EndsWith,
+}
+
+/// Given the part of a locator that follows the field name (e.g. the `:btn`
+/// in `@class:btn`, or the `^=Log` in `text^=Log`), detect the operator and
+/// return it together with the value. Order matters: the two-char operators
+/// must be tried before the single `=`/`^`/`$` they contain.
+fn split_match_op(s: &str) -> Option<(MatchOp, &str)> {
+    if let Some(v) = s.strip_prefix("*=") {
+        return Some((MatchOp::Contains, v));
+    }
+    if let Some(v) = s.strip_prefix(':') {
+        return Some((MatchOp::Contains, v));
+    }
+    if let Some(v) = s.strip_prefix("^=").or_else(|| s.strip_prefix('^')) {
+        return Some((MatchOp::StartsWith, v));
+    }
+    if let Some(v) = s.strip_prefix("$=").or_else(|| s.strip_prefix('$')) {
+        return Some((MatchOp::EndsWith, v));
+    }
+    if let Some(v) = s.strip_prefix('=') {
+        return Some((MatchOp::Exact, v));
+    }
+    None
+}
+
 /// Parse a single (non-chained) locator
 fn parse_single_locator(input: &str) -> Result<Locator> {
     let input = input.trim();
@@ -175,53 +249,43 @@ fn parse_single_locator(input: &str) -> Result<Locator> {
         return Ok(Locator::Css(rest.to_string()));
     }
 
-    // text*=xxx (must check before text=)
-    if let Some(rest) = input.strip_prefix("text*=") {
-        if rest.is_empty() {
-            return Err(Error::InvalidLocator("text*= requires a value".into()));
-        }
-        return Ok(Locator::TextContains(rest.to_string()));
-    }
-
-    // text=xxx
-    if let Some(rest) = input.strip_prefix("text=") {
-        if rest.is_empty() {
-            return Err(Error::InvalidLocator("text= requires a value".into()));
-        }
-        return Ok(Locator::Text(rest.to_string()));
-    }
-
-    // @attr*=val (must check before @attr=val)
-    if input.starts_with('@') && input.contains("*=") {
-        let rest = &input[1..]; // remove leading @
-        if let Some(pos) = rest.find("*=") {
-            let attr = &rest[..pos];
-            let value = &rest[pos + 2..];
-            if attr.is_empty() {
-                return Err(Error::InvalidLocator(
-                    "@attr*=val requires attr name".into(),
-                ));
+    // text=xxx / text:xxx / text^xxx / text$xxx (and text*=xxx legacy).
+    // Guard against bare tag names that merely start with "text" (e.g.
+    // "textarea"): only treat as a text locator when an operator follows.
+    if let Some(rest) = input.strip_prefix("text") {
+        if let Some((op, value)) = split_match_op(rest) {
+            if value.is_empty() {
+                return Err(Error::InvalidLocator("text matcher requires a value".into()));
             }
-            return Ok(Locator::AttrContains {
-                attr: attr.to_string(),
-                value: value.to_string(),
+            let value = value.to_string();
+            return Ok(match op {
+                MatchOp::Exact => Locator::Text(value),
+                MatchOp::Contains => Locator::TextContains(value),
+                MatchOp::StartsWith => Locator::TextStartsWith(value),
+                MatchOp::EndsWith => Locator::TextEndsWith(value),
             });
         }
     }
 
-    // @attr=val
-    if input.starts_with('@') && input.contains('=') {
-        let rest = &input[1..]; // remove leading @
-        if let Some(pos) = rest.find('=') {
-            let attr = &rest[..pos];
-            let value = &rest[pos + 1..];
-            if attr.is_empty() {
-                return Err(Error::InvalidLocator("@attr=val requires attr name".into()));
+    // @attr=val / @attr:val / @attr^val / @attr$val (and @attr*=val legacy).
+    if let Some(rest) = input.strip_prefix('@') {
+        // The attribute name is the leading run of name characters; whatever
+        // follows is the operator + value.
+        let name_len = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(rest.len());
+        let attr = &rest[..name_len];
+        if !attr.is_empty() {
+            if let Some((op, value)) = split_match_op(&rest[name_len..]) {
+                let attr = attr.to_string();
+                let value = value.to_string();
+                return Ok(match op {
+                    MatchOp::Exact => Locator::AttrEquals { attr, value },
+                    MatchOp::Contains => Locator::AttrContains { attr, value },
+                    MatchOp::StartsWith => Locator::AttrStartsWith { attr, value },
+                    MatchOp::EndsWith => Locator::AttrEndsWith { attr, value },
+                });
             }
-            return Ok(Locator::AttrEquals {
-                attr: attr.to_string(),
-                value: value.to_string(),
-            });
         }
     }
 
@@ -280,6 +344,14 @@ pub fn locator_to_selector(locator: &Locator) -> Result<String> {
             attr,
             value.replace('\'', "\\'")
         )),
+        // Starts-with / ends-with reuse the XPath built in `to_xpath`.
+        Locator::TextStartsWith(_)
+        | Locator::TextEndsWith(_)
+        | Locator::AttrStartsWith { .. }
+        | Locator::AttrEndsWith { .. } => locator
+            .to_xpath()
+            .map(|xp| format!("xpath:{xp}"))
+            .ok_or_else(|| Error::InvalidLocator("cannot build xpath".into())),
         Locator::Chain(locators) => locators
             .last()
             .ok_or_else(|| Error::InvalidLocator("empty chain".into()))
@@ -354,6 +426,70 @@ mod tests {
     fn test_text_contains() {
         let loc = parse_locator("text*=Log").unwrap();
         assert_eq!(loc, Locator::TextContains("Log".to_string()));
+    }
+
+    #[test]
+    fn test_text_contains_colon() {
+        // DrissionPage `:` = contains
+        let loc = parse_locator("text:登录").unwrap();
+        assert_eq!(loc, Locator::TextContains("登录".to_string()));
+    }
+
+    #[test]
+    fn test_text_starts_ends_with() {
+        assert_eq!(
+            parse_locator("text^Hello").unwrap(),
+            Locator::TextStartsWith("Hello".to_string())
+        );
+        assert_eq!(
+            parse_locator("text$world").unwrap(),
+            Locator::TextEndsWith("world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_textarea_is_css_not_text_locator() {
+        // A tag name that merely starts with "text" must stay CSS.
+        assert_eq!(
+            parse_locator("textarea").unwrap(),
+            Locator::Css("textarea".to_string())
+        );
+    }
+
+    #[test]
+    fn test_attr_contains_colon() {
+        let loc = parse_locator("@class:btn").unwrap();
+        assert_eq!(
+            loc,
+            Locator::AttrContains {
+                attr: "class".to_string(),
+                value: "btn".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_attr_starts_ends_with() {
+        assert_eq!(
+            parse_locator("@href^https").unwrap(),
+            Locator::AttrStartsWith {
+                attr: "href".to_string(),
+                value: "https".to_string()
+            }
+        );
+        assert_eq!(
+            parse_locator("@src$.png").unwrap(),
+            Locator::AttrEndsWith {
+                attr: "src".to_string(),
+                value: ".png".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_text_ends_with_xpath_uses_substring() {
+        let xp = Locator::TextEndsWith("bar".to_string()).to_xpath().unwrap();
+        assert!(xp.contains("substring") && xp.contains("string-length"));
     }
 
     #[test]
