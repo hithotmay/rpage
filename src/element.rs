@@ -247,6 +247,64 @@ impl Element {
         }
     }
 
+    /// Evaluate a JS predicate (`function(){... return <bool>}`) against this
+    /// element's live DOM node, returning `false` on any failure (no page, no
+    /// object id, CDP error, non-boolean result). Shared by the geometric/
+    /// liveness state checks below.
+    async fn eval_bool(&self, fn_decl: &str) -> bool {
+        let page = match self.page.as_ref() {
+            Some(p) => p,
+            None => return false,
+        };
+        let oid = match self.object_id.as_ref() {
+            Some(o) if !o.is_empty() => o,
+            _ => return false,
+        };
+        use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+        let params = match CallFunctionOnParams::builder()
+            .object_id(oid.clone())
+            .function_declaration(fn_decl)
+            .return_by_value(true)
+            .build()
+        {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        match page.execute(params).await {
+            Ok(result) => result
+                .result
+                .result
+                .value
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether this element's bounding rect intersects the current viewport
+    /// (DrissionPage `states.is_in_viewport`). Returns `false` if the element
+    /// is fully scrolled off-screen or detached.
+    pub async fn is_in_viewport(&self) -> bool {
+        self.eval_bool(
+            "function(){\
+                if(!this||!this.isConnected) return false;\
+                var r=this.getBoundingClientRect();\
+                var vw=window.innerWidth||document.documentElement.clientWidth;\
+                var vh=window.innerHeight||document.documentElement.clientHeight;\
+                return r.bottom>0 && r.right>0 && r.top<vh && r.left<vw;\
+            }",
+        )
+        .await
+    }
+
+    /// Whether this element is still attached to the live DOM tree
+    /// (DrissionPage `states.is_alive`). Useful after navigation or DOM
+    /// mutation to tell a stale handle from a live one.
+    pub async fn is_alive(&self) -> bool {
+        self.eval_bool("function(){ return !!(this && this.isConnected); }")
+            .await
+    }
+
     /// The locator used to find this element.
     pub fn locator(&self) -> Option<&Locator> {
         self.locator.as_ref()
@@ -255,6 +313,14 @@ impl Element {
     // ── Internal: get CDP element by re-resolving ────────────
 
     /// Re-resolve this element in the live page via its locator.
+    ///
+    /// Only works for CSS-backed elements: `locator_to_selector` returns an
+    /// "xpath:"-prefixed string for XPath/text=/@attr= locators, but CDP's
+    /// `DOM.querySelector` (what `find_element` wraps) has no concept of that
+    /// prefix and has no native XPath support at all — there is no CDP
+    /// command for "find by XPath" to fall back to. XPath-backed elements
+    /// must instead go through `xpath_center_point` + page-level CDP input
+    /// dispatch, which doesn't need a resolved element handle.
     async fn cdp_element(&self) -> Result<chromiumoxide::Element> {
         let page = self
             .page
@@ -270,34 +336,116 @@ impl Element {
             .map_err(|e| Error::Browser(format!("re-resolve element: {e}")))
     }
 
+    /// Locate an XPath-backed element's viewport-relative center point via JS
+    /// (`document.evaluate` + `getBoundingClientRect`, after scrolling it
+    /// into view), for dispatching real CDP input events at its coordinates.
+    /// Used by every interaction method's XPath branch instead of each
+    /// duplicating this lookup.
+    async fn xpath_center_point(&self, xpath: &str) -> Result<(f64, f64)> {
+        let escaped = serde_json::to_string(xpath).unwrap_or_else(|_| format!("\"{}\"", xpath));
+        let js = format!(
+            "(function() {{ \
+               var result = document.evaluate({xp}, document, null, \
+                 XPathResult.FIRST_ORDERED_NODE_TYPE, null); \
+               var el = result.singleNodeValue; \
+               if (!el) return null; \
+               el.scrollIntoView({{block:'center'}}); \
+               var r = el.getBoundingClientRect(); \
+               return [r.x + r.width / 2, r.y + r.height / 2]; \
+             }})()",
+            xp = escaped
+        );
+        let page = self.page.as_ref()
+            .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
+        let val = page.evaluate(js.as_str()).await
+            .map_err(|e| Error::Browser(format!("xpath locate: {e}")))?;
+        let coords = val.value().and_then(|v| v.as_array())
+            .ok_or_else(|| Error::ElementNotFound(format!("xpath not found: {}", xpath)))?;
+        let x = coords.first().and_then(|v| v.as_f64())
+            .ok_or_else(|| Error::Browser("xpath locate: missing x coordinate".into()))?;
+        let y = coords.get(1).and_then(|v| v.as_f64())
+            .ok_or_else(|| Error::Browser("xpath locate: missing y coordinate".into()))?;
+        Ok((x, y))
+    }
+
+    /// Resolve this element's click-point coordinates, whether it's CSS- or
+    /// XPath-backed. Scrolls the element into view first.
+    async fn click_point(&self) -> Result<(f64, f64)> {
+        if let Some(ref xpath) = self.fallback_xpath {
+            return self.xpath_center_point(xpath).await;
+        }
+        let cdp_el = self.cdp_element().await?;
+        cdp_el
+            .scroll_into_view()
+            .await
+            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
+        let bbox = cdp_el
+            .bounding_box()
+            .await
+            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
+        Ok((bbox.x + bbox.width / 2.0, bbox.y + bbox.height / 2.0))
+    }
+
+    /// Dispatch a real CDP mouse press+release at `(x, y)` — shared by
+    /// `right_click`/`double_click` (and anything else needing a button/
+    /// click-count combination `Page::click` doesn't cover).
+    async fn dispatch_click(
+        &self,
+        x: f64,
+        y: f64,
+        button: chromiumoxide::cdp::browser_protocol::input::MouseButton,
+        click_count: i64,
+    ) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType,
+        };
+        let page = self.page.as_ref()
+            .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x)
+            .y(y)
+            .button(button.clone())
+            .click_count(click_count)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(press).await
+            .map_err(|e| Error::Browser(format!("dispatch: {e}")))?;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x)
+            .y(y)
+            .button(button)
+            .click_count(click_count)
+            .build()
+            .map_err(|e| Error::Browser(format!("build: {e}")))?;
+        page.execute(release).await
+            .map_err(|e| Error::Browser(format!("dispatch: {e}")))?;
+        Ok(())
+    }
+
     // ── Async interactions (CDP only) ────────────────────────
 
     /// Click this element. Falls back to JS click if CDP click fails.
     /// For XPath-backed elements, uses JS XPath re-location.
     pub async fn click(&self) -> Result<()> {
-        // If we have a fallback_xpath, use JS-based click directly
+        // If we have a fallback_xpath, locate the element via JS, then
+        // dispatch a *real* CDP mouse click at its coordinates rather than
+        // calling `el.click()` from JS. `el.click()` is a script-synthesized
+        // event, not a genuine user gesture — Chrome silently drops
+        // gesture-gated effects for it (most notably: clicking a
+        // `target="_blank"` link does nothing, because the popup blocker
+        // requires a real user gesture to open the new tab). A CDP-level
+        // `Input.dispatchMouseEvent` (what `Page::click` issues) *is* treated
+        // as genuine, matching the native-CSS-path's behavior below.
         if let Some(ref xpath) = self.fallback_xpath {
-            let escaped = serde_json::to_string(xpath).unwrap_or_else(|_| format!("\"{}\"", xpath));
-            let js = format!(
-                "(function() {{ \
-                   var result = document.evaluate({xp}, document, null, \
-                     XPathResult.FIRST_ORDERED_NODE_TYPE, null); \
-                   var el = result.singleNodeValue; \
-                   if (!el) return false; \
-                   el.scrollIntoView({{block:'center'}}); \
-                   el.click(); \
-                   return true; \
-                 }})()",
-                xp = escaped
-            );
+            let (x, y) = self.xpath_center_point(xpath).await?;
             let page = self.page.as_ref()
                 .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
-            let val = page.evaluate(js.as_str()).await
-                .map_err(|e| Error::Browser(format!("xpath click: {e}")))?;
-            if val.value().and_then(|v| v.as_bool()).unwrap_or(false) {
-                return Ok(());
-            }
-            return Err(Error::ElementNotFound(format!("xpath click failed: {}", xpath)));
+            page.click(chromiumoxide::layout::Point::new(x, y)).await
+                .map_err(|e| Error::Browser(format!("xpath click: dispatch: {e}")))?;
+            return Ok(());
         }
 
         let cdp_el = self.cdp_element().await?;
@@ -314,19 +462,22 @@ impl Element {
     /// Supports Chinese and all Unicode characters.
     /// Appends to existing value.
     pub async fn input(&self, text: &str) -> Result<()> {
-        let cdp_el = self.cdp_element().await?;
-        cdp_el
-            .scroll_into_view()
+        // Focus first — `click()` handles both XPath- and CSS-backed elements
+        // (including the "Node is either not visible" JS-click fallback), so
+        // there's no need to duplicate focus logic per-branch here.
+        //
+        // Type via the page-level `Input.insertText` rather than CDP's
+        // per-key `type_str`/`Input.dispatchKeyEvent`: that simulates
+        // physical keyboard keys and has no mapping for non-ASCII text
+        // (Chinese, etc.), failing with "Key not found: <char>". insertText
+        // has no such limitation, which is what this method's doc promises.
+        self.click().await.map_err(|e| Error::Browser(format!("focus: {e}")))?;
+        let page = self.page.as_ref()
+            .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
+        use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
+        page.execute(InsertTextParams::new(text))
             .await
-            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
-        cdp_el
-            .click()
-            .await
-            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
-        cdp_el
-            .type_str(text)
-            .await
-            .map_err(|e| Error::Browser(format!("type: {e}")))?;
+            .map_err(|e| Error::Browser(format!("insert text: {e}")))?;
         Ok(())
     }
 
@@ -400,6 +551,24 @@ impl Element {
 
     /// Hover over this element (move mouse to element center).
     pub async fn hover(&self) -> Result<()> {
+        if let Some(ref xpath) = self.fallback_xpath {
+            let (x, y) = self.xpath_center_point(xpath).await?;
+            let page = self.page.as_ref()
+                .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
+            use chromiumoxide::cdp::browser_protocol::input::{
+                DispatchMouseEventParams, DispatchMouseEventType,
+            };
+            let mv = DispatchMouseEventParams::builder()
+                .r#type(DispatchMouseEventType::MouseMoved)
+                .x(x)
+                .y(y)
+                .build()
+                .map_err(|e| Error::Browser(format!("build: {e}")))?;
+            page.execute(mv).await
+                .map_err(|e| Error::Browser(format!("xpath hover: {e}")))?;
+            return Ok(());
+        }
+
         let cdp_el = self.cdp_element().await?;
         cdp_el
             .scroll_into_view()
@@ -428,19 +597,40 @@ impl Element {
             .page
             .as_ref()
             .ok_or(Error::Browser("requires Chromium mode".into()))?;
+
+        // Focus the element first — `click()` already handles XPath-backed
+        // elements (real CDP mouse click) vs CSS-backed ones consistently.
+        self.click().await.map_err(|e| Error::Browser(format!("focus: {e}")))?;
+
+        if self.fallback_xpath.is_some() {
+            // No element handle for XPath-backed elements (see
+            // `cdp_element()`'s doc comment) — dispatch the key at the
+            // page level instead, same as `ChromiumPage::press()`.
+            use chromiumoxide::cdp::browser_protocol::input::{
+                DispatchKeyEventParams, DispatchKeyEventType,
+            };
+            let down = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyDown)
+                .key(key)
+                .build()
+                .map_err(|e| Error::Browser(format!("key build: {e}")))?;
+            page.execute(down).await
+                .map_err(|e| Error::Browser(format!("press_key: {e}")))?;
+            let up = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyUp)
+                .key(key)
+                .build()
+                .map_err(|e| Error::Browser(format!("key build: {e}")))?;
+            page.execute(up).await
+                .map_err(|e| Error::Browser(format!("press_key: {e}")))?;
+            return Ok(());
+        }
+
         let cdp_el = self.cdp_element().await?;
-        // Focus the element first
-        cdp_el
-            .click()
-            .await
-            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
-        // Press the key
         cdp_el
             .press_key(key)
             .await
             .map_err(|e| Error::Browser(format!("press_key: {e}")))?;
-        // Just consume the page reference to avoid unused warning
-        let _ = page;
         Ok(())
     }
 
@@ -581,16 +771,27 @@ impl Element {
         Ok(())
     }
 
-    /// Right-click this element (fires `contextmenu` event).
+    /// Right-click (context-click) this element via a real CDP mouse event.
+    ///
+    /// Dispatching a synthetic `MouseEvent('contextmenu')` from JS only fires
+    /// JS listeners for that event — it can't open the browser's actual
+    /// native context menu (that's a browser-UI feature JS has no access to)
+    /// and, like any script-synthesized event, isn't a genuine user gesture.
+    /// A real `Input.dispatchMouseEvent` right-press/release is what an
+    /// actual right-click does.
     pub async fn right_click(&self) -> Result<()> {
-        self.js("this.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true}))")
-            .await
+        use chromiumoxide::cdp::browser_protocol::input::MouseButton;
+        let (x, y) = self.click_point().await?;
+        self.dispatch_click(x, y, MouseButton::Right, 1).await
     }
 
-    /// Double-click this element (fires `dblclick` event).
+    /// Double-click this element via a real CDP mouse event (two presses at
+    /// `click_count: 2`, which is what makes Chrome treat it as a genuine
+    /// double-click rather than two unrelated single clicks).
     pub async fn double_click(&self) -> Result<()> {
-        self.js("this.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))")
-            .await
+        use chromiumoxide::cdp::browser_protocol::input::MouseButton;
+        let (x, y) = self.click_point().await?;
+        self.dispatch_click(x, y, MouseButton::Left, 2).await
     }
 
     /// Take a screenshot of just this element and save to `path` as PNG.
@@ -631,23 +832,27 @@ impl Element {
 
     /// Drag this element to a target element.
     pub async fn drag_to(&self, target: &Element) -> Result<()> {
-        let src = self.cdp_element().await?;
-        let tgt = target.cdp_element().await?;
-        let _ = src.scroll_into_view().await;
-
-        let src_bbox = src
-            .bounding_box()
-            .await
-            .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
-        let tgt_bbox = tgt
-            .bounding_box()
-            .await
-            .map_err(|e| Error::Browser(format!("tgt bbox: {e}")))?;
-
-        let src_x = src_bbox.x + src_bbox.width / 2.0;
-        let src_y = src_bbox.y + src_bbox.height / 2.0;
-        let tgt_x = tgt_bbox.x + tgt_bbox.width / 2.0;
-        let tgt_y = tgt_bbox.y + tgt_bbox.height / 2.0;
+        let (src_x, src_y) = if let Some(ref xpath) = self.fallback_xpath {
+            self.xpath_center_point(xpath).await?
+        } else {
+            let src = self.cdp_element().await?;
+            let _ = src.scroll_into_view().await;
+            let src_bbox = src
+                .bounding_box()
+                .await
+                .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
+            (src_bbox.x + src_bbox.width / 2.0, src_bbox.y + src_bbox.height / 2.0)
+        };
+        let (tgt_x, tgt_y) = if let Some(ref xpath) = target.fallback_xpath {
+            target.xpath_center_point(xpath).await?
+        } else {
+            let tgt = target.cdp_element().await?;
+            let tgt_bbox = tgt
+                .bounding_box()
+                .await
+                .map_err(|e| Error::Browser(format!("tgt bbox: {e}")))?;
+            (tgt_bbox.x + tgt_bbox.width / 2.0, tgt_bbox.y + tgt_bbox.height / 2.0)
+        };
 
         let page = self
             .page
@@ -709,16 +914,17 @@ impl Element {
 
     /// Drag this element by an offset (relative movement).
     pub async fn drag_to_offset(&self, offset_x: f64, offset_y: f64) -> Result<()> {
-        let src = self.cdp_element().await?;
-        let _ = src.scroll_into_view().await;
-
-        let src_bbox = src
-            .bounding_box()
-            .await
-            .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
-
-        let src_x = src_bbox.x + src_bbox.width / 2.0;
-        let src_y = src_bbox.y + src_bbox.height / 2.0;
+        let (src_x, src_y) = if let Some(ref xpath) = self.fallback_xpath {
+            self.xpath_center_point(xpath).await?
+        } else {
+            let src = self.cdp_element().await?;
+            let _ = src.scroll_into_view().await;
+            let src_bbox = src
+                .bounding_box()
+                .await
+                .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
+            (src_bbox.x + src_bbox.width / 2.0, src_bbox.y + src_bbox.height / 2.0)
+        };
         let tgt_x = src_x + offset_x;
         let tgt_y = src_y + offset_y;
 
@@ -772,106 +978,6 @@ impl Element {
             .x(tgt_x)
             .y(tgt_y)
             .button(MouseButton::Left)
-            .click_count(1)
-            .build()
-            .map_err(|e| Error::Browser(format!("build: {e}")))?;
-        page.execute(release).await.ok();
-
-        Ok(())
-    }
-
-    /// Double-click this element via CDP mouse events (more realistic than JS event).
-    pub async fn double_click_cdp(&self) -> Result<()> {
-        let cdp_el = self.cdp_element().await?;
-        cdp_el
-            .scroll_into_view()
-            .await
-            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
-
-        let bbox = cdp_el
-            .bounding_box()
-            .await
-            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
-
-        let page = self
-            .page
-            .as_ref()
-            .ok_or_else(|| Error::Browser("double_click_cdp requires Chromium mode".into()))?;
-
-        use chromiumoxide::cdp::browser_protocol::input::{
-            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
-        };
-
-        let x = bbox.x + bbox.width / 2.0;
-        let y = bbox.y + bbox.height / 2.0;
-
-        let press = DispatchMouseEventParams::builder()
-            .r#type(DispatchMouseEventType::MousePressed)
-            .x(x)
-            .y(y)
-            .button(MouseButton::Left)
-            .click_count(2)
-            .build()
-            .map_err(|e| Error::Browser(format!("build: {e}")))?;
-        page.execute(press).await.ok();
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let release = DispatchMouseEventParams::builder()
-            .r#type(DispatchMouseEventType::MouseReleased)
-            .x(x)
-            .y(y)
-            .button(MouseButton::Left)
-            .click_count(2)
-            .build()
-            .map_err(|e| Error::Browser(format!("build: {e}")))?;
-        page.execute(release).await.ok();
-
-        Ok(())
-    }
-
-    /// Right-click (context-click) this element via CDP mouse events.
-    pub async fn right_click_cdp(&self) -> Result<()> {
-        let cdp_el = self.cdp_element().await?;
-        cdp_el
-            .scroll_into_view()
-            .await
-            .map_err(|e| Error::Browser(format!("scroll: {e}")))?;
-
-        let bbox = cdp_el
-            .bounding_box()
-            .await
-            .map_err(|e| Error::Browser(format!("bbox: {e}")))?;
-
-        let page = self
-            .page
-            .as_ref()
-            .ok_or_else(|| Error::Browser("right_click_cdp requires Chromium mode".into()))?;
-
-        use chromiumoxide::cdp::browser_protocol::input::{
-            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
-        };
-
-        let x = bbox.x + bbox.width / 2.0;
-        let y = bbox.y + bbox.height / 2.0;
-
-        let press = DispatchMouseEventParams::builder()
-            .r#type(DispatchMouseEventType::MousePressed)
-            .x(x)
-            .y(y)
-            .button(MouseButton::Right)
-            .click_count(1)
-            .build()
-            .map_err(|e| Error::Browser(format!("build: {e}")))?;
-        page.execute(press).await.ok();
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let release = DispatchMouseEventParams::builder()
-            .r#type(DispatchMouseEventType::MouseReleased)
-            .x(x)
-            .y(y)
-            .button(MouseButton::Right)
             .click_count(1)
             .build()
             .map_err(|e| Error::Browser(format!("build: {e}")))?;

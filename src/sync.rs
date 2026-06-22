@@ -16,7 +16,6 @@ use crate::chromium_page::{ChromiumPage, CookieInfo, FrameContext, InterceptGuar
 use crate::error::{Error, Result};
 use crate::agent::{ActionAttempt, InteractiveElement, PageSnapshot, PageSummary};
 use crate::download::DownloadInfo;
-use crate::wait::WaitOptions;
 use std::time::Duration;
 
 /// 同步 Page — 内部持有 tokio runtime，所有方法零 await
@@ -198,6 +197,8 @@ impl SyncPage {
     pub fn set_blocked_urls(&self, urls: &[&str]) -> Result<()> { self.rt().block_on(self.inner.set_blocked_urls(urls)) }
     pub fn set_offline(&self, offline: bool) -> Result<()> { self.rt().block_on(self.inner.set_offline(offline)) }
     pub fn clear_cache(&self) -> Result<()> { self.rt().block_on(self.inner.clear_cache()) }
+    pub fn run_cdp(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> { self.rt().block_on(self.inner.run_cdp(method, params)) }
+    pub fn get_response_body(&self, request_id: &str) -> Result<crate::chromium_page::ResponseBody> { self.rt().block_on(self.inner.get_response_body(request_id)) }
     pub fn links(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.links()) }
     pub fn images(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.images()) }
     pub fn disable_images(&self) -> Result<()> { self.rt().block_on(self.inner.disable_images()) }

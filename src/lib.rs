@@ -31,9 +31,9 @@ pub mod prelude;
 pub use chromium_page::ChromiumPage;
 pub use chromium_page::{
     ActionChain, CookieInfo, FileChooserInfo, FrameContext, InterceptGuard, InterceptedRequest,
-    PdfOptions,
+    PdfOptions, ResponseBody,
 };
-pub use config::{ChromiumOptions, SessionOptions, WebPageOptions};
+pub use config::{default_debug_port, ChromiumOptions, SessionOptions, WebPageOptions};
 pub use console::ConsoleMonitor;
 pub use cookie_hub::CookieHub;
 pub use download::DownloadManager;

@@ -45,6 +45,9 @@
 - **同步 API** — `SyncPage` 零 await 封装，`SyncPage::connect()` 一步到位
 - **Agent 智能接口** — `interactive_elements()`/`page_snapshot()`/`smart_click()`/`smart_fill()` 直接给 AI Agent 用
 - **JS XPath 回退** — 非 CSS 定位器（`text:`/`tag:`）自动回退 XPath
+- **原始 CDP 直通** — `run_cdp()` 执行任意 CDP 命令；`get_response_body()` 抓响应体（含 base64 解码）
+- **元素状态** — `is_in_viewport()` / `is_alive()`，对标 DrissionPage `states`
+- **DrissionPage 定位器** — 文本/属性运算符 `=`/`:`/`^`/`$`（精确/包含/前缀/后缀）全支持
 
 ## 🚀 快速开始
 
@@ -206,16 +209,20 @@ let el = page.ele("#id").await?;
 let els = page.eles("h3").await?;
 ```
 
+文本/属性运算符对齐 DrissionPage：`=` 精确，`:` 包含，`^` 前缀，`$` 后缀。
+
 | 语法 | 说明 |
 |------|------|
 | `#id`, `.class` | CSS |
 | `@class=btn` | 属性精确 |
-| `@class*=btn` | 属性包含 |
-| `@class^=btn` | 属性前缀 |
-| `@class$=btn` | 属性后缀 |
-| `text:登录` | 文本精确 |
-| `text*:登录` | 文本包含 |
-| `tag:form@@text:登录` | 链式定位 |
+| `@class:btn`（或 `@class*=btn`） | 属性包含 |
+| `@class^btn` | 属性前缀 |
+| `@class$btn` | 属性后缀 |
+| `text=登录` | 文本精确 |
+| `text:登录`（或 `text*=登录`） | 文本包含 |
+| `text^登录` | 文本前缀 |
+| `text$登录` | 文本后缀 |
+| `tag:form@@text=登录` | 链式定位 |
 
 ### 条件等待 (10)
 
@@ -561,6 +568,29 @@ page.network_monitor().clear();
 ```rust
 page.listen_websocket().await?;
 let frames = page.websocket_frames();
+```
+
+### 原始 CDP + 响应体 (DrissionPage `run_cdp` 对标)
+
+```rust
+// 任意 CDP 命令直通 —— rpage 没封装的命令都能用
+let m = page.run_cdp("Page.getLayoutMetrics", serde_json::json!({})).await?;
+page.run_cdp("Network.setUserAgentOverride",
+    serde_json::json!({ "userAgent": "my-bot/1.0" })).await?;
+
+// 抓响应体（配合 on_response / get_responses 拿到 request_id）
+for r in page.get_responses("/api/") {
+    let body = page.get_response_body(&r.request_id).await?;
+    println!("{} -> {}", r.url, body.text());   // base64 自动解码用 body.bytes()
+}
+```
+
+### 元素状态 (DrissionPage `states` 对标)
+
+```rust
+let el = page.ele("#item").await?;
+el.is_in_viewport().await;   // 是否在可视区内
+el.is_alive().await;          // 是否仍挂在 DOM 上
 ```
 
 ### 网络监听模式 (4) — iter10

@@ -296,6 +296,73 @@ pub struct ChromiumPage {
     load_strategy: String,
     /// Whether the high-level listen mode (DrissionPage-style) is active.
     listening: Arc<Mutex<bool>>,
+    /// The Chrome process we spawned, if any — `None` when we connected to an
+    /// already-running browser we don't own. `quit()` uses this as a guaranteed
+    /// fallback: a `Browser.close` CDP request is graceful but not guaranteed
+    /// (e.g. the WS is already broken, or Chrome ignores it), and a dropped
+    /// `Child` handle does not kill the process on its own — so without this,
+    /// a failed graceful close leaves an unkillable orphan.
+    child: Mutex<Option<std::process::Child>>,
+}
+
+/// A type-erased CDP command for `ChromiumPage::run_cdp`. chromiumoxide's
+/// `Page::execute` is generic over the typed `Command` structs it generates,
+/// so to send an arbitrary `Domain.method` + JSON params (the escape hatch)
+/// we implement the same traits over a method name and a raw `Value`: the
+/// params are serialized verbatim as the call payload, and the response is
+/// handed back as untyped JSON.
+struct RawCdpCommand {
+    method: std::borrow::Cow<'static, str>,
+    params: serde_json::Value,
+}
+
+impl serde::Serialize for RawCdpCommand {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        self.params.serialize(serializer)
+    }
+}
+
+impl chromiumoxide::Method for RawCdpCommand {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        self.method.clone()
+    }
+}
+
+impl chromiumoxide::Command for RawCdpCommand {
+    type Response = serde_json::Value;
+}
+
+/// The body of a network response, as returned by
+/// [`ChromiumPage::get_response_body`]. `base64_encoded` is true for binary
+/// payloads (images, fonts, …); use [`ResponseBody::bytes`] to decode those.
+#[derive(Debug, Clone)]
+pub struct ResponseBody {
+    pub body: String,
+    pub base64_encoded: bool,
+}
+
+impl ResponseBody {
+    /// The body as raw bytes, base64-decoding first when Chrome flagged the
+    /// payload as binary. For text responses this is just the UTF-8 bytes.
+    pub fn bytes(&self) -> Vec<u8> {
+        if self.base64_encoded {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(self.body.as_bytes())
+                .unwrap_or_default()
+        } else {
+            self.body.clone().into_bytes()
+        }
+    }
+
+    /// The body as a UTF-8 string (lossy), decoding base64 first if needed.
+    pub fn text(&self) -> String {
+        if self.base64_encoded {
+            String::from_utf8_lossy(&self.bytes()).into_owned()
+        } else {
+            self.body.clone()
+        }
+    }
 }
 
 impl ChromiumPage {
@@ -311,21 +378,35 @@ impl ChromiumPage {
     /// 默认参数），所以浏览器没有任何自动化标记，和用户手动打开的完全一样。
     pub async fn new() -> Result<Self> {
         let chrome_path = find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?;
-        // Use a dedicated user-data-dir to avoid conflicts with running Chrome
-        let ud = std::env::temp_dir().join("rpage-chrome");
-        // Use PID-based port to avoid multi-instance conflicts
-        let port = 9300 + ((std::process::id() as u16) % 700);
+        let port = crate::config::default_debug_port();
+        // The user-data-dir must vary with the port (both keyed off this
+        // process's PID): Chrome's single-instance lock on a user-data-dir
+        // is keyed by directory, not port, so a leftover Chrome from a
+        // previous run (or a different host process) sitting on a fixed,
+        // shared "rpage-chrome" dir would make any new process targeting a
+        // different port silently hand off to that old instance instead of
+        // ever binding its own debug port — `wait_for_port` then times out
+        // looking like the browser failed to start (or "closed").
+        let ud = std::env::temp_dir().join(format!("rpage-chrome-{port}"));
         Self::launch_and_connect(
             &chrome_path,
             Some(&ud),
             port,
             &[],
-            true,
+            false, // headful — see doc comment above: a real, visible browser
+                   // indistinguishable from one the user opened by hand is the
+                   // whole point of `new()`; headless contradicts that and is
+                   // also a much easier signal for sites to detect as a bot.
             None,
             true,
             false,
             &[],
-            ChromiumOptions::default(),
+            // Skip Network/Runtime monitoring setup (see `enable_monitoring`'s
+            // doc comment): `new()` is meant to be a fast, low-overhead,
+            // visible debug session, not background request/console/download
+            // telemetry, and enabling the Network domain is the dominant
+            // source of chromiumoxide's "WS Invalid message" warning spam.
+            ChromiumOptions::builder().enable_monitoring(false).build(),
         )
         .await
     }
@@ -338,11 +419,14 @@ impl ChromiumPage {
             find_chrome().ok_or_else(|| Error::Browser("Chrome not found".into()))?
         };
 
+        let port = opts.debug_port;
+        // Key the fallback dir off the port (see `new()`): a fixed shared dir
+        // would let a stale Chrome instance on a different port lock out any
+        // new launch that doesn't pass an explicit `user_data_dir`.
         let user_data_dir = opts
             .user_data_dir
             .clone()
-            .unwrap_or_else(|| std::env::temp_dir().join("rpage-chrome"));
-        let port = opts.debug_port;
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("rpage-chrome-{port}")));
         let extra_args = opts.extra_args.clone();
         let headless = opts.headless;
         let proxy = opts.proxy.clone();
@@ -421,10 +505,22 @@ impl ChromiumPage {
             if let Some(ud) = user_data_dir {
                 cmd.arg(format!("--user-data-dir={}", ud.display()));
             } else {
-                // Chrome requires non-default data dir for remote debugging
-                let tmp = std::env::temp_dir().join("rpage-chrome");
+                // Both current callers always pass `Some(_)` (keyed off `port`,
+                // see `new()`/`with_options()`), so this is a defensive fallback
+                // only — kept consistent with them rather than reintroducing a
+                // fixed shared dir that could collide across ports.
+                let tmp = std::env::temp_dir().join(format!("rpage-chrome-{port}"));
                 cmd.arg(format!("--user-data-dir={}", tmp.display()));
             }
+
+            // Every launch uses a brand-new, port-keyed profile directory (see
+            // above), so without these Chrome treats *every single launch* as
+            // a genuine first run — welcome page / sign-in prompts / "set as
+            // default browser" dialogs. Those can overlay or intercept clicks
+            // aimed at the actual page content, making automation look like
+            // it silently does nothing.
+            cmd.arg("--no-first-run");
+            cmd.arg("--no-default-browser-check");
 
             // Apply headless mode
             if headless {
@@ -462,11 +558,27 @@ impl ChromiumPage {
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
             }
 
-            cmd.spawn()
+            // Chrome (and its long-lived gpu/utility/renderer subprocesses)
+            // must not inherit our stdio: by default `Command` inherits the
+            // parent's handles, so anything capturing this process's
+            // stdout/stderr via a pipe (a test harness, a log redirect)
+            // never sees EOF — the pipe stays open as long as any spawned
+            // Chrome subprocess is alive, even after we've exited.
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+
+            let child = cmd.spawn()
                 .map_err(|e| Error::Browser(format!("spawn Chrome: {e}")))?;
 
             // Wait for debug port to be ready
             Self::wait_for_port(debug_url.clone()).await?;
+
+            // Connect via CDP, then attach the child we spawned so `quit()`
+            // can force-kill it if the graceful CDP close doesn't.
+            let page = Self::connect_with_opts(&debug_url, opts).await?;
+            *page.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+            return Ok(page);
         } else {
             info!("Browser already running on port {port}, reusing");
         }
@@ -526,11 +638,25 @@ impl ChromiumPage {
             while h.next().await.is_some() {}
         });
 
-        // Get the first existing page, or create one
-        let pages = browser
-            .pages()
-            .await
-            .map_err(|e| Error::Browser(format!("get pages: {e}")))?;
+        // Get the first existing page, or create one. `browser.pages()`
+        // reflects Target.* events processed by the handler task just
+        // spawned above — calling it immediately races that processing and
+        // can spuriously return empty even though tabs already exist, which
+        // made every `connect_with_opts` call open a redundant new tab
+        // instead of reusing the existing one (e.g. every repeated
+        // 创建浏览器() call kept piling up tabs). Poll briefly instead of
+        // trusting a single immediate call.
+        let mut pages = Vec::new();
+        for attempt in 0..10 {
+            pages = browser
+                .pages()
+                .await
+                .map_err(|e| Error::Browser(format!("get pages: {e}")))?;
+            if !pages.is_empty() || attempt == 9 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
 
         let page = if let Some(p) = pages.into_iter().next() {
             info!("Reusing existing page");
@@ -551,12 +677,47 @@ impl ChromiumPage {
         info!("Connected to existing browser — zero automation flags");
         let nm = Arc::new(crate::network::NetworkMonitor::new());
         let dm_clone = Arc::new(DownloadManager::new());
+        let cm = Arc::new(ConsoleMonitor::new());
+        let ws = Arc::new(WebSocketMonitor::new());
 
-        // ── Safe event initialization ──
-        // NOTE: All CDP commands and event_listener registrations are wrapped in
-        // timeouts to prevent a single broken CDP domain from deadlocking the entire
-        // connection.  Chrome 149+ has deprecated `Browser.setDownloadBehavior`, so we
-        // skip it entirely and rely on event listeners alone.
+        if opts.enable_monitoring {
+            Self::start_monitoring(&page, nm.clone(), dm_clone.clone(), cm.clone(), ws.clone())
+                .await;
+        }
+
+        Ok(Self {
+            browser,
+            page,
+            opts,
+            debug_url: debug_url.to_string(),
+            download_manager: dm_clone,
+            network_monitor: nm,
+            console_monitor: cm,
+            ws_monitor: ws,
+            init_scripts: Arc::new(Mutex::new(HashMap::new())),
+            init_script_ids: Arc::new(Mutex::new(HashMap::new())),
+            load_strategy: "normal".into(),
+            listening: Arc::new(Mutex::new(false)),
+            child: Mutex::new(None),
+        })
+    }
+
+    /// Enables Network/Runtime CDP domains and wires up the event listeners
+    /// that feed `network_monitor`/`download_manager`/`console_monitor`/
+    /// `ws_monitor`. Skipped by `connect_with_opts` when
+    /// `ChromiumOptions::enable_monitoring` is false (see its doc comment).
+    ///
+    /// All CDP commands and event_listener registrations are wrapped in
+    /// timeouts so a single broken CDP domain can't deadlock the whole
+    /// connection. Chrome 149+ has deprecated `Browser.setDownloadBehavior`,
+    /// so we skip it entirely and rely on event listeners alone.
+    async fn start_monitoring(
+        page: &Page,
+        nm: Arc<crate::network::NetworkMonitor>,
+        dm_clone: Arc<DownloadManager>,
+        cm: Arc<ConsoleMonitor>,
+        ws: Arc<WebSocketMonitor>,
+    ) {
         let init_timeout = std::time::Duration::from_secs(3);
 
         // Network.enable — needed for request/download/WebSocket events
@@ -576,6 +737,52 @@ impl ChromiumPage {
                         method: ev.request.method.clone(),
                         headers: hdrs,
                         resource_type: format!("{:?}", ev.r#type),
+                    });
+                }
+            });
+        }
+
+        // Network.responseReceived — feeds `responses()`/`get_responses()` and
+        // fires the `on_response` callbacks. Without this listener those were
+        // dead: nothing ever called `record_response`, so the response monitor
+        // and every `on_response` handler stayed permanently empty.
+        let nm2 = nm.clone();
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventResponseReceived>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    let mut hdrs = std::collections::HashMap::new();
+                    if let Some(obj) = ev.response.headers.inner().as_object() {
+                        for (k, v) in obj { hdrs.insert(k.clone(), v.as_str().unwrap_or_default().to_string()); }
+                    }
+                    nm2.record_response(crate::network::ResponseRecord {
+                        request_id: ev.request_id.clone().into(),
+                        url: ev.response.url.clone(),
+                        status: ev.response.status as u16,
+                        headers: hdrs,
+                        mime_type: ev.response.mime_type.clone(),
+                    });
+                }
+            });
+        }
+
+        // Network.loadingFailed — feeds `failures()`. The event itself carries
+        // no URL, so resolve it from the matching request we already recorded.
+        let nm3 = nm.clone();
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventLoadingFailed>()).await {
+            tokio::spawn(async move {
+                while let Some(ev) = rx.next().await {
+                    let rid: String = ev.request_id.clone().into();
+                    let url = nm3
+                        .requests()
+                        .into_iter()
+                        .rev()
+                        .find(|r| r.request_id == rid)
+                        .map(|r| r.url)
+                        .unwrap_or_default();
+                    nm3.record_failure(crate::network::FailedRequest {
+                        request_id: rid,
+                        url,
+                        error_text: ev.error_text.clone(),
                     });
                 }
             });
@@ -615,7 +822,6 @@ impl ChromiumPage {
         }
 
         // Runtime.enable — console + exception monitoring
-        let cm = Arc::new(ConsoleMonitor::new());
         let cm1 = cm.clone();
         let cm2 = cm.clone();
         let _ = tokio::time::timeout(init_timeout, crate::console::enable_runtime(&pc)).await;
@@ -675,7 +881,6 @@ impl ChromiumPage {
         }
 
         // WebSocket monitoring — uses Network domain (already enabled above)
-        let ws = Arc::new(WebSocketMonitor::new());
         let ws1 = ws.clone();
         let ws2 = ws.clone();
         let ws3 = ws.clone();
@@ -728,21 +933,6 @@ impl ChromiumPage {
                 }
             });
         }
-
-        Ok(Self {
-            browser,
-            page,
-            opts,
-            debug_url: debug_url.to_string(),
-            download_manager: dm_clone,
-            network_monitor: nm,
-            console_monitor: cm,
-            ws_monitor: ws,
-            init_scripts: Arc::new(Mutex::new(HashMap::new())),
-            init_script_ids: Arc::new(Mutex::new(HashMap::new())),
-            load_strategy: "normal".into(),
-            listening: Arc::new(Mutex::new(false)),
-        })
     }
 
     // ── Navigation (auto-wait for page load) ────────────────
@@ -2055,6 +2245,21 @@ impl ChromiumPage {
     /// Wait for an element matching the locator to appear.
     pub async fn wait_ele(&self, locator_str: &str, timeout_secs: u64) -> Result<Element> {
         let locator = crate::locator::parse_locator(locator_str)?;
+
+        // Non-CSS locators (XPath, text=, text*=, @attr=, @attr*=) must go
+        // through the JS-based XPath fallback: `locator_to_selector` returns
+        // an "xpath:"-prefixed string for them, but chromiumoxide's native
+        // `find_element` only understands plain CSS selectors and has no
+        // concept of that prefix — passing it through always fails, so this
+        // used to just spin until timeout for any non-CSS locator. `ele()`
+        // already handles this correctly; mirror that here.
+        if !locator.is_css() {
+            let xpath = locator.to_xpath().ok_or_else(|| {
+                Error::InvalidLocator(format!("cannot convert to xpath: {locator_str}"))
+            })?;
+            return self.ele_by_xpath_fallback(&xpath, timeout_secs).await;
+        }
+
         let selector = locator_to_selector(&locator)?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -2215,10 +2420,21 @@ impl ChromiumPage {
     pub async fn quit(&self) -> Result<()> {
         // Use CDP Browser.close to gracefully shut down
         use chromiumoxide::cdp::browser_protocol::browser::CloseParams;
-        self.page
-            .execute(CloseParams::default())
-            .await
-            .map_err(|e| Error::Browser(format!("quit: {e}")))?;
+        let graceful = self.page.execute(CloseParams::default()).await;
+
+        // Force-kill the process we own as a guaranteed fallback: the
+        // graceful request above isn't guaranteed to land (e.g. the WS is
+        // already broken), and a `Browser.close` failure must not leave an
+        // unkillable orphan running. No-op when we connected to a browser we
+        // don't own (`child` is `None` there).
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        graceful.map_err(|e| Error::Browser(format!("quit: {e}")))?;
         Ok(())
     }
 
@@ -2379,8 +2595,8 @@ impl ChromiumPage {
     /// copied via CDP).
     pub async fn clone_session(&self) -> Result<ChromiumPage> {
         let mut opts = self.opts.clone();
-        // Assign a different debug port to avoid conflicts
-        opts.debug_port = 9300 + ((std::process::id() as u16).wrapping_add(1) % 700);
+        // Assign a different debug port to avoid conflicts with `default_debug_port()`
+        opts.debug_port = crate::config::default_debug_port().wrapping_add(1);
         // If no user_data_dir was set, generate a unique temp one
         if opts.user_data_dir.is_none() {
             opts.user_data_dir =
@@ -3021,6 +3237,69 @@ impl ChromiumPage {
     /// Clear all registered request/response listener callbacks.
     pub fn clear_listeners(&self) {
         self.network_monitor.clear_listeners();
+    }
+
+    // ── Raw CDP escape hatch + response bodies ─────────────────
+
+    /// Execute an arbitrary CDP command by `Domain.method` name with JSON
+    /// `params`, returning the raw JSON result. This is the escape hatch for
+    /// the long tail of CDP commands rpage doesn't wrap directly (mirrors
+    /// DrissionPage's `run_cdp`).
+    ///
+    /// ```ignore
+    /// // Override the User-Agent for just this page via raw CDP.
+    /// page.run_cdp("Network.setUserAgentOverride",
+    ///     serde_json::json!({ "userAgent": "my-bot/1.0" })).await?;
+    /// let metrics = page.run_cdp("Page.getLayoutMetrics", serde_json::json!({})).await?;
+    /// ```
+    pub async fn run_cdp(
+        &self,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let method = method.into();
+        if !method.contains('.') {
+            return Err(Error::Browser(format!(
+                "run_cdp: invalid method '{method}' (expected 'Domain.method')"
+            )));
+        }
+        // CDP requires the params payload to be an object; map a missing/Null
+        // argument to an empty object so callers can pass `json!(null)`.
+        let params = match params {
+            serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+            other => other,
+        };
+        let cmd = RawCdpCommand {
+            method: std::borrow::Cow::Owned(method),
+            params,
+        };
+        let resp = self
+            .page
+            .execute(cmd)
+            .await
+            .map_err(|e| Error::Browser(format!("run_cdp: {e}")))?;
+        Ok(resp.result)
+    }
+
+    /// Fetch the body of a network response by its request id (as recorded in
+    /// `responses()`/`get_responses()`), via CDP `Network.getResponseBody`.
+    ///
+    /// This closes the gap to DrissionPage's `DataPacket.response.body`:
+    /// `responses()` gives the metadata, this gives the actual payload. It
+    /// requires monitoring to be enabled (the Network domain) and only works
+    /// while Chrome still retains the body — call it once the request has
+    /// finished loading and before it's evicted from the network cache.
+    pub async fn get_response_body(&self, request_id: &str) -> Result<ResponseBody> {
+        use chromiumoxide::cdp::browser_protocol::network::GetResponseBodyParams;
+        let resp = self
+            .page
+            .execute(GetResponseBodyParams::new(request_id.to_string()))
+            .await
+            .map_err(|e| Error::Browser(format!("get_response_body: {e}")))?;
+        Ok(ResponseBody {
+            body: resp.result.body.clone(),
+            base64_encoded: resp.result.base64_encoded,
+        })
     }
 
     /// Get all captured console log entries.
@@ -3882,9 +4161,16 @@ impl ChromiumPage {
     }
 
     /// Set offline mode (true = offline, false = online).
+    ///
+    /// Uses `Network.overrideNetworkState` rather than the deprecated
+    /// `Network.emulateNetworkConditions`: Chrome split that command into
+    /// `overrideNetworkState` (online/offline + `navigator.connection`) and
+    /// `emulateNetworkConditionsByRule` (per-request throttling). Toggling
+    /// offline only needs the former, and its `new()` signature is identical
+    /// (the `-1.0` throughput args mean "no throttling").
     pub async fn set_offline(&self, offline: bool) -> Result<()> {
         self.page.execute(
-            chromiumoxide::cdp::browser_protocol::network::EmulateNetworkConditionsParams::new(
+            chromiumoxide::cdp::browser_protocol::network::OverrideNetworkStateParams::new(
                 offline, 0.0, -1.0, -1.0,
             ),
         )
@@ -4234,7 +4520,7 @@ impl ChromiumPage {
                 let _ = self.wait_js("document.readyState === 'complete' || document.readyState === 'interactive'", 5).await;
                 Ok(())
             }
-            Err(e) => {
+            Err(_) => {
                 let _ = self.execute("history.forward()").await;
                 self.sleep(std::time::Duration::from_millis(300)).await;
                 // Forward failure is usually "no forward history" — not fatal

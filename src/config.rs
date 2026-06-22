@@ -6,6 +6,14 @@ use std::time::Duration;
 /// Default timeout in seconds
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
+/// The debug port `ChromiumPage::new()` uses for its PID-derived, per-process
+/// browser session. Exposed publicly so other in-process consumers that want
+/// to attach to that same browser (rather than launch a separate one) can
+/// compute the identical port instead of guessing or hardcoding one.
+pub fn default_debug_port() -> u16 {
+    9300 + (std::process::id() as u16 % 700)
+}
+
 /// Viewport dimensions
 #[derive(Debug, Clone)]
 pub struct Viewport {
@@ -51,6 +59,20 @@ pub struct ChromiumOptions {
     pub extra_args: Vec<String>,
     /// Debug port for CDP connection (default: 9222)
     pub debug_port: u16,
+    /// Enable Network/Runtime CDP domains and their event listeners
+    /// (request/download/console/exception/WebSocket-frame monitoring).
+    ///
+    /// This costs a handful of extra CDP round-trips on connect, and —
+    /// because enabling the `Network` domain makes Chrome start streaming
+    /// every network sub-event over the same connection — is the dominant
+    /// source of chromiumoxide's harmless-but-noisy "WS Invalid message"
+    /// warnings when chromiumoxide's CDP schema doesn't cover some sub-event
+    /// shape the running Chrome version emits (see f33/the network/download
+    /// monitor fields). Defaults to `true` to preserve existing behavior for
+    /// callers using `with_options()`; `ChromiumPage::new()` (`创建浏览器()`)
+    /// turns it off, since its whole point is a fast, low-overhead, visible
+    /// debug session, not background telemetry.
+    pub enable_monitoring: bool,
 }
 
 impl Default for ChromiumOptions {
@@ -69,6 +91,7 @@ impl Default for ChromiumOptions {
             no_sandbox: false,
             extra_args: Vec::new(),
             debug_port: 9222,
+            enable_monitoring: true,
         }
     }
 }
@@ -146,6 +169,16 @@ impl ChromiumOptionsBuilder {
 
     pub fn arg(mut self, a: impl Into<String>) -> Self {
         self.opts.extra_args.push(a.into());
+        self
+    }
+
+    pub fn enable_monitoring(mut self, v: bool) -> Self {
+        self.opts.enable_monitoring = v;
+        self
+    }
+
+    pub fn debug_port(mut self, port: u16) -> Self {
+        self.opts.debug_port = port;
         self
     }
 
