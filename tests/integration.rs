@@ -494,64 +494,138 @@ fn download_manager_new() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Integration: Session mode HTTP request (requires network)
+// Integration: Session mode HTTP (against a local server)
+//
+// These used to hit httpbin.org, which is flaky — it rate-limits and can
+// return an error page with a 200, so a successful-but-unexpected response
+// failed the test (rather than skipping like a real network error). They
+// now drive a tiny in-process HTTP server: deterministic and fully offline.
 // ═══════════════════════════════════════════════════════════
 
+/// Spawn a minimal local HTTP server for the session tests. Handles `/html`
+/// (a known body), `/post` (echoes the request body), and a
+/// `/cookies/set?<kv>` → `/cookies` round-trip. Returns the bound port.
+fn spawn_http_server() -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let line = req.lines().next().unwrap_or("");
+            let path = line.split_whitespace().nth(1).unwrap_or("/");
+            let body_in = req.split("\r\n\r\n").nth(1).unwrap_or("");
+            let cookie_hdr = req
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                .map(|l| l[7..].trim().to_string())
+                .unwrap_or_default();
+
+            let (status, set_cookie, ctype, body) = if path.starts_with("/html") {
+                (
+                    "200 OK",
+                    String::new(),
+                    "text/html; charset=utf-8",
+                    "<html><body><h1>Herman Melville - Moby-Dick</h1></body></html>".to_string(),
+                )
+            } else if path.starts_with("/post") {
+                (
+                    "200 OK",
+                    String::new(),
+                    "application/json",
+                    format!("{{\"data\":\"{}\"}}", body_in.replace('"', "\\\"")),
+                )
+            } else if path.starts_with("/cookies/set") {
+                let kv = path.split('?').nth(1).unwrap_or("test=123");
+                (
+                    "200 OK",
+                    format!("Set-Cookie: {kv}; Path=/\r\n"),
+                    "text/html",
+                    "<html>set</html>".to_string(),
+                )
+            } else if path.starts_with("/cookies") {
+                (
+                    "200 OK",
+                    String::new(),
+                    "application/json",
+                    format!("{{\"cookies\":\"{cookie_hdr}\"}}"),
+                )
+            } else {
+                ("404 Not Found", String::new(), "text/plain", "nope".to_string())
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{set_cookie}Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    port
+}
+
 #[tokio::test]
-async fn session_get_httpbin() {
+async fn session_get_local() {
+    let port = spawn_http_server();
     let opts = SessionOptions::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .build();
     let mut page = rpage::SessionPage::with_options(opts).unwrap();
-    let html = match page.get("https://httpbin.org/html").await {
-        Ok(h) => h,
-        Err(_) => return, // skip if network unavailable
-    };
+    let html = page
+        .get(&format!("http://127.0.0.1:{port}/html"))
+        .await
+        .unwrap();
     assert!(html.contains("Herman Melville"));
 }
 
 #[tokio::test]
-async fn session_find_elements_httpbin() {
+async fn session_find_elements_local() {
+    let port = spawn_http_server();
     let opts = SessionOptions::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .build();
     let mut page = rpage::SessionPage::with_options(opts).unwrap();
-    if page.get("https://httpbin.org/html").await.is_err() {
-        return; // skip if network unavailable
-    }
+    page.get(&format!("http://127.0.0.1:{port}/html"))
+        .await
+        .unwrap();
     let h1 = page.ele("h1").unwrap();
     assert!(h1.text().contains("Herman Melville"));
 }
 
 #[tokio::test]
-async fn session_cookies_httpbin() {
+async fn session_cookies_local() {
+    let port = spawn_http_server();
     let opts = SessionOptions::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .build();
     let mut page = rpage::SessionPage::with_options(opts).unwrap();
-    if page
-        .get("https://httpbin.org/cookies/set?test=123")
+    page.get(&format!("http://127.0.0.1:{port}/cookies/set?test=123"))
         .await
-        .is_err()
-    {
-        return;
-    }
-    if page.get("https://httpbin.org/cookies").await.is_err() {
-        return;
-    }
-    assert!(page.html().contains("test") || page.html().contains("123"));
+        .unwrap();
+    page.get(&format!("http://127.0.0.1:{port}/cookies"))
+        .await
+        .unwrap();
+    // The cookie set on the first request must be sent back on the second.
+    assert!(page.html().contains("test") && page.html().contains("123"));
 }
 
 #[tokio::test]
-async fn session_post_httpbin() {
+async fn session_post_local() {
+    let port = spawn_http_server();
     let opts = SessionOptions::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .build();
     let mut page = rpage::SessionPage::with_options(opts).unwrap();
-    let body = match page.post("https://httpbin.org/post", "hello world").await {
-        Ok(b) => b,
-        Err(_) => return,
-    };
+    let body = page
+        .post(&format!("http://127.0.0.1:{port}/post"), "hello world")
+        .await
+        .unwrap();
     assert!(body.contains("hello world"));
 }
 
@@ -566,9 +640,10 @@ async fn webpage_session_only() {
         .build();
     let mut page = rpage::WebPage::session_only(Some(session_opts)).unwrap();
     assert_eq!(page.mode(), rpage::web_page::PageMode::Session);
-    if page.get("https://httpbin.org/html").await.is_err() {
-        return;
-    }
+    let port = spawn_http_server();
+    page.get(&format!("http://127.0.0.1:{port}/html"))
+        .await
+        .unwrap();
     let html = page.html().await.unwrap();
     assert!(html.contains("Herman Melville"));
 }
