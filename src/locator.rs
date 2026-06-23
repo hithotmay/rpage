@@ -13,7 +13,9 @@
 //! - `@attr=val` → AttrEquals
 //! - `@attr:val` / `@attr*=val` → AttrContains
 //! - `@attr^val` → AttrStartsWith, `@attr$val` → AttrEndsWith
-//! - `tag:form@@text=Login` → Chain([Css("form"), Text("Login")])
+//! - `tag:div@@class=x@@text:y` → And (same-element, all conditions required)
+//! - `@|class=a@|class=b` → Or (same-element, any condition)
+//! - `a@@@b@@@c` → Chain (descendant narrowing, rpage extension)
 
 use crate::error::{Error, Result};
 
@@ -40,8 +42,82 @@ pub enum Locator {
     AttrStartsWith { attr: String, value: String },
     /// Attribute ends-with value
     AttrEndsWith { attr: String, value: String },
-    /// Chained locators (narrow down step by step)
+    /// Multiple conditions on the SAME element, all required — DrissionPage `@@`
+    /// (e.g. `tag:div@@class=x@@text:y`). The first element may be a bare tag.
+    And(Vec<Locator>),
+    /// Multiple conditions on the SAME element, any one — DrissionPage `@|`.
+    Or(Vec<Locator>),
+    /// Chained locators (narrow down step by step) — rpage `@@@` descendant chain
     Chain(Vec<Locator>),
+}
+
+impl Locator {
+    /// Render this locator as an XPath *predicate* fragment (no leading `//*`),
+    /// for composing same-element AND/OR conditions. Returns `None` for things
+    /// that can't be a predicate (a tag/element name, xpath, nested groups).
+    fn to_xpath_predicate(&self) -> Option<String> {
+        let esc = |s: &str| s.replace('\'', "\\'");
+        match self {
+            Locator::Text(t) => Some(format!("text()='{}'", esc(t))),
+            Locator::TextContains(t) => Some(format!("contains(text(),'{}')", esc(t))),
+            Locator::TextStartsWith(t) => Some(format!("starts-with(text(),'{}')", esc(t))),
+            Locator::TextEndsWith(t) => {
+                let t = esc(t);
+                Some(format!(
+                    "substring(text(),string-length(text())-string-length('{t}')+1)='{t}'"
+                ))
+            }
+            Locator::AttrEquals { attr, value } => Some(format!("@{}='{}'", attr, esc(value))),
+            Locator::AttrContains { attr, value } => {
+                Some(format!("contains(@{},'{}')", attr, esc(value)))
+            }
+            Locator::AttrStartsWith { attr, value } => {
+                Some(format!("starts-with(@{},'{}')", attr, esc(value)))
+            }
+            Locator::AttrEndsWith { attr, value } => {
+                let value = esc(value);
+                Some(format!(
+                    "substring(@{attr},string-length(@{attr})-string-length('{value}')+1)='{value}'"
+                ))
+            }
+            // A `#id` / `.class` CSS condition can also be a predicate.
+            Locator::Css(s) => {
+                if let Some(id) = s.strip_prefix('#') {
+                    Some(format!("@id='{}'", esc(id)))
+                } else if let Some(cls) = s.strip_prefix('.') {
+                    Some(format!(
+                        "contains(concat(' ',normalize-space(@class),' '),' {} ')",
+                        esc(cls)
+                    ))
+                } else {
+                    None // a bare tag name is the element, not a predicate
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Build the combined XPath for a same-element AND/OR group.
+    fn multi_cond_xpath(parts: &[Locator], join: &str) -> Option<String> {
+        let mut tag = "*".to_string();
+        let mut preds = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            // A leading bare tag (`Css("div")` with no #/.) becomes the element.
+            if i == 0 {
+                if let Locator::Css(s) = p {
+                    if !s.starts_with('#') && !s.starts_with('.') && !s.contains(['>', ' ', '[']) {
+                        tag = s.clone();
+                        continue;
+                    }
+                }
+            }
+            preds.push(p.to_xpath_predicate()?);
+        }
+        if preds.is_empty() {
+            return None;
+        }
+        Some(format!("//{}[{}]", tag, preds.join(join)))
+    }
 }
 
 impl Locator {
@@ -60,6 +136,8 @@ impl Locator {
             | Locator::AttrContains { .. }
             | Locator::AttrStartsWith { .. }
             | Locator::AttrEndsWith { .. }
+            | Locator::And(_)
+            | Locator::Or(_)
             | Locator::Chain(_) => None,
         }
     }
@@ -118,6 +196,8 @@ impl Locator {
                     "//*[substring(@{attr},string-length(@{attr})-string-length('{value}')+1)='{value}']"
                 ))
             }
+            Locator::And(parts) => Self::multi_cond_xpath(parts, " and "),
+            Locator::Or(parts) => Self::multi_cond_xpath(parts, " or "),
             Locator::Chain(locators) => {
                 // Build a combined XPath from chain
                 let mut parts = Vec::new();
@@ -151,6 +231,8 @@ impl Locator {
                 | Locator::AttrContains { .. }
                 | Locator::AttrStartsWith { .. }
                 | Locator::AttrEndsWith { .. }
+                | Locator::And(_)
+                | Locator::Or(_)
         )
     }
 }
@@ -162,7 +244,12 @@ pub fn parse_locator(input: &str) -> Result<Locator> {
         return Err(Error::InvalidLocator("empty locator string".into()));
     }
 
-    // Check for chain separator: @@@ or @@
+    // Same-element OR conditions (DrissionPage `@|`): base@|c1@|c2
+    if input.contains("@|") {
+        return parse_multi_cond(input, "@|", false);
+    }
+
+    // Descendant chain (rpage-specific `@@@`): narrow down step by step.
     if input.contains("@@@") {
         let parts: Vec<&str> = input.split("@@@").collect();
         if parts.len() < 2 {
@@ -177,17 +264,54 @@ pub fn parse_locator(input: &str) -> Result<Locator> {
         return Ok(Locator::Chain(locators));
     }
 
-    // Check for tag:xxx@@text=yyy pattern (2-part chain)
+    // Same-element AND conditions (DrissionPage `@@`): tag:div@@class=x@@text:y
     if input.contains("@@") && !input.starts_with('@') {
-        let parts: Vec<&str> = input.splitn(2, "@@").collect();
-        if parts.len() == 2 {
-            let first = parse_single_locator(parts[0].trim())?;
-            let second = parse_single_locator(parts[1].trim())?;
-            return Ok(Locator::Chain(vec![first, second]));
-        }
+        return parse_multi_cond(input, "@@", true);
     }
 
     parse_single_locator(input)
+}
+
+/// Parse a DrissionPage same-element multi-condition (`@@` AND / `@|` OR). The
+/// first segment may be a bare tag (becomes the element); the rest are
+/// attribute/text conditions, all applied to the *same* element.
+fn parse_multi_cond(input: &str, sep: &str, and: bool) -> Result<Locator> {
+    let parts: Vec<&str> = input
+        .split(sep)
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return Err(Error::InvalidLocator(format!(
+            "invalid multi-condition locator: {input}"
+        )));
+    }
+    let locs: Vec<Locator> = parts
+        .iter()
+        .map(|p| parse_condition(p))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(if and {
+        Locator::And(locs)
+    } else {
+        Locator::Or(locs)
+    })
+}
+
+/// Parse one condition of a multi-condition locator. DrissionPage allows a bare
+/// `attr=val` (no `@`) as an attribute condition; a leading tag / `text:` /
+/// `#id` / `.class` / `@attr` is parsed as-is.
+fn parse_condition(s: &str) -> Result<Locator> {
+    let prefixed = s.starts_with('@')
+        || s.starts_with("text")
+        || s.starts_with("tag:")
+        || s.starts_with("css:")
+        || s.starts_with("xpath:")
+        || s.starts_with('#')
+        || s.starts_with('.');
+    if !prefixed && s.contains(['=', ':', '^', '$']) {
+        return parse_single_locator(&format!("@{s}"));
+    }
+    parse_single_locator(s)
 }
 
 /// A text/attribute match operator, following DrissionPage conventions:
@@ -348,7 +472,9 @@ pub fn locator_to_selector(locator: &Locator) -> Result<String> {
         Locator::TextStartsWith(_)
         | Locator::TextEndsWith(_)
         | Locator::AttrStartsWith { .. }
-        | Locator::AttrEndsWith { .. } => locator
+        | Locator::AttrEndsWith { .. }
+        | Locator::And(_)
+        | Locator::Or(_) => locator
             .to_xpath()
             .map(|xp| format!("xpath:{xp}"))
             .ok_or_else(|| Error::InvalidLocator("cannot build xpath".into())),
@@ -518,14 +644,15 @@ mod tests {
 
     #[test]
     fn test_chain_double_at() {
+        // `@@` is now DrissionPage same-element AND (was descendant chain).
         let loc = parse_locator("tag:form@@text=Login").unwrap();
         match loc {
-            Locator::Chain(parts) => {
+            Locator::And(parts) => {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0], Locator::Css("form".to_string()));
                 assert_eq!(parts[1], Locator::Text("Login".to_string()));
             }
-            _ => panic!("expected Chain"),
+            _ => panic!("expected And"),
         }
     }
 
@@ -616,12 +743,12 @@ mod tests {
     fn test_chain_tag_text_chinese() {
         let loc = parse_locator("tag:form@@text=登录").unwrap();
         match loc {
-            Locator::Chain(parts) => {
+            Locator::And(parts) => {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0], Locator::Css("form".to_string()));
                 assert_eq!(parts[1], Locator::Text("登录".to_string()));
             }
-            _ => panic!("expected Chain"),
+            _ => panic!("expected And"),
         }
     }
 
@@ -656,13 +783,50 @@ mod tests {
     #[test]
     fn test_chain_double_at_with_attr() {
         let loc = parse_locator("tag:div@@name=user").unwrap();
-        // "name=user" without @ prefix is parsed as plain CSS
+        // bare `name=user` (no @) is now an attribute condition, AND with the tag.
         match loc {
-            Locator::Chain(parts) => {
+            Locator::And(parts) => {
                 assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Locator::Css("div".to_string()));
+                assert_eq!(
+                    parts[1],
+                    Locator::AttrEquals {
+                        attr: "name".to_string(),
+                        value: "user".to_string()
+                    }
+                );
             }
-            _ => panic!("expected Chain"),
+            _ => panic!("expected And"),
         }
+    }
+
+    #[test]
+    fn test_and_xpath_same_element() {
+        let loc = parse_locator("tag:div@@class=test@@text:hi").unwrap();
+        assert_eq!(
+            loc.to_xpath().unwrap(),
+            "//div[@class='test' and contains(text(),'hi')]"
+        );
+        assert!(loc.is_xpath() && !loc.is_css());
+    }
+
+    #[test]
+    fn test_or_xpath() {
+        let loc = parse_locator("@|class=a@|class=b").unwrap();
+        assert!(matches!(loc, Locator::Or(_)));
+        assert_eq!(
+            loc.to_xpath().unwrap(),
+            "//*[@class='a' or @class='b']"
+        );
+    }
+
+    #[test]
+    fn test_and_startswith_and_text_contains() {
+        let loc = parse_locator("tag:a@@href^http@@text:more").unwrap();
+        assert_eq!(
+            loc.to_xpath().unwrap(),
+            "//a[starts-with(@href,'http') and contains(text(),'more')]"
+        );
     }
 
     #[test]
