@@ -170,12 +170,13 @@ impl SyncPage {
 
     // ── 标签页 ────────────────────────────────────────
 
-    pub fn tabs(&self) -> Result<Vec<SyncPage>> {
-        // tabs() 返回 Vec<Page> (chromiumoxide Page)，不是 ChromiumPage
-        // 暂时返回标题列表更实用
-        let titles = self.rt().block_on(self.inner.tab_titles())?;
-        // 无法直接构造 SyncPage from Page，提供便捷方法
-        Err(Error::Browser(format!("共 {} 个标签: {:?}", titles.len(), titles)))
+    /// Number of open tabs. (A `Vec<SyncPage>` isn't returnable: each SyncPage
+    /// owns its own runtime and chromiumoxide's tab handles aren't
+    /// `ChromiumPage`s — drive multiple tabs with `tab_titles`/`tab_urls` +
+    /// `switch_to_tab`/`close_tab` instead.) Replaces the old `tabs()`, which
+    /// could only ever return an `Err` with the titles stuffed in its message.
+    pub fn tab_count(&self) -> Result<usize> {
+        Ok(self.rt().block_on(self.inner.tab_titles())?.len())
     }
     pub fn tab_titles(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.tab_titles()) }
     pub fn tab_urls(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.tab_urls()) }
@@ -211,6 +212,12 @@ impl SyncPage {
     pub fn run_cdp(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> { self.rt().block_on(self.inner.run_cdp(method, params)) }
     pub fn get_response_body(&self, request_id: &str) -> Result<crate::chromium_page::ResponseBody> { self.rt().block_on(self.inner.get_response_body(request_id)) }
     pub fn wait_data_packet(&self, url_pattern: &str, timeout_secs: u64) -> Result<crate::chromium_page::DataPacket> { self.rt().block_on(self.inner.wait_data_packet(url_pattern, timeout_secs)) }
+    pub fn listen_start(&self) -> Result<()> { self.rt().block_on(self.inner.listen_start()) }
+    pub fn listen_stop(&self) -> Result<()> { self.rt().block_on(self.inner.listen_stop()) }
+    pub fn get_packets(&self, url_pattern: &str) -> Vec<crate::network::RequestInfo> { self.inner.get_packets(url_pattern) }
+    pub fn get_responses(&self, url_pattern: &str) -> Vec<crate::network::ResponseInfo> { self.inner.get_responses(url_pattern) }
+    pub fn wait_for_packet(&self, url_pattern: &str, timeout_secs: u64) -> Result<crate::network::RequestInfo> { self.inner.wait_for_packet(url_pattern, timeout_secs) }
+    pub fn wait_network_idle(&self, timeout_secs: u64, quiet_ms: u64) -> Result<()> { self.rt().block_on(self.inner.wait_network_idle(timeout_secs, quiet_ms)) }
     pub fn links(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.links()) }
     pub fn images(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.images()) }
     pub fn disable_images(&self) -> Result<()> { self.rt().block_on(self.inner.disable_images()) }
@@ -266,6 +273,22 @@ impl SyncPage {
     pub fn performance_metrics(&self) -> Result<Vec<(String, f64)>> { self.rt().block_on(self.inner.performance_metrics()) }
     pub fn page_timing(&self) -> Result<std::collections::HashMap<String, f64>> { self.rt().block_on(self.inner.page_timing()) }
     pub fn dom_snapshot(&self) -> Result<serde_json::Value> { self.rt().block_on(self.inner.dom_snapshot()) }
+
+    // ── 监控查询（console / WebSocket / 下载，均为同步）──
+    pub fn console_log(&self) -> Vec<crate::console::ConsoleEntry> { self.inner.console_log() }
+    pub fn console_exceptions(&self) -> Vec<crate::console::JsException> { self.inner.console_exceptions() }
+    pub fn clear_console(&self) { self.inner.clear_console() }
+    pub fn ws_frames(&self) -> Vec<crate::websocket::WsFrame> { self.inner.ws_frames() }
+    pub fn ws_events(&self) -> Vec<crate::websocket::WsEvent> { self.inner.ws_events() }
+    pub fn clear_ws_frames(&self) { self.inner.clear_ws_frames() }
+    pub fn downloads(&self) -> Vec<DownloadInfo> { self.inner.downloads() }
+    pub fn clear_downloads(&self) { self.inner.clear_downloads() }
+    pub fn load_strategy(&self) -> &str { self.inner.load_strategy() }
+
+    // ── 健壮导航（出错不致命）──
+    pub fn safe_back(&self) -> Result<()> { self.rt().block_on(self.inner.safe_back()) }
+    pub fn safe_forward(&self) -> Result<()> { self.rt().block_on(self.inner.safe_forward()) }
+    pub fn safe_refresh(&self) -> Result<()> { self.rt().block_on(self.inner.safe_refresh()) }
 
     // ── 权限 / 设备 ───────────────────────────────────
 
@@ -360,7 +383,11 @@ impl SyncElement {
     pub fn bounding_box(&self) -> Result<(f64, f64, f64, f64)> { self.rt.block_on(self.inner.bounding_box()) }
     pub fn is_selected(&self) -> Result<bool> { self.rt.block_on(self.inner.is_selected()) }
     pub fn is_visible(&self) -> bool { self.rt.block_on(self.inner.is_visible()) }
+    pub fn is_in_viewport(&self) -> bool { self.rt.block_on(self.inner.is_in_viewport()) }
+    pub fn is_alive(&self) -> bool { self.rt.block_on(self.inner.is_alive()) }
     pub fn style(&self, prop: &str) -> Result<String> { self.rt.block_on(self.inner.style(prop)) }
+    pub fn set_value(&self, value: &str) -> Result<()> { self.rt.block_on(self.inner.set_value(value)) }
+    pub fn remove(&self) -> Result<()> { self.rt.block_on(self.inner.remove()) }
 
     pub fn select(&self, text: &str) -> Result<()> { self.rt.block_on(self.inner.select(text)) }
     pub fn select_by_value(&self, val: &str) -> Result<()> { self.rt.block_on(self.inner.select_by_value(val)) }
@@ -418,6 +445,12 @@ impl SyncElement {
     pub fn wait_for_hidden_with_timeout(&self, timeout: Duration) -> Result<()> { self.rt.block_on(self.inner.wait_for_hidden_with_timeout(timeout)) }
     pub fn wait_for_enabled(&self) -> Result<()> { self.rt.block_on(self.inner.wait_for_enabled()) }
     pub fn wait_for_enabled_with_timeout(&self, timeout: Duration) -> Result<()> { self.rt.block_on(self.inner.wait_for_enabled_with_timeout(timeout)) }
+    pub fn wait_for_clickable(&self) -> Result<()> { self.rt.block_on(self.inner.wait_for_clickable()) }
+    pub fn wait_for_stale(&self) -> Result<()> { self.rt.block_on(self.inner.wait_for_stale()) }
+    pub fn wait_for_text(&self, text: &str) -> Result<()> { self.rt.block_on(self.inner.wait_for_text(text)) }
+    pub fn wait_for_text_eq(&self, text: &str) -> Result<()> { self.rt.block_on(self.inner.wait_for_text_eq(text)) }
+    pub fn wait_for_attribute(&self, name: &str, value: &str) -> Result<()> { self.rt.block_on(self.inner.wait_for_attribute(name, value)) }
+    pub fn wait_for_attribute_contains(&self, name: &str, value: &str) -> Result<()> { self.rt.block_on(self.inner.wait_for_attribute_contains(name, value)) }
 
     // ── 子元素查找 ─────────────────────────────────────
 

@@ -16,7 +16,7 @@
 - **链式调用** — `page.goto(url).await?.type_text("#kw", "rust").await?` 一行完成导航+输入
 - **一步到位 API** — `click_ele()`/`get_text()`/`get_attr()` 无需先 `ele()` 再操作
 - **网络包实时监听** — `on_request()`/`on_response()` 回调式捕获每个请求和响应
-- **网络监听模式** — listen_start/stop + continue_request/fail_request 请求级控制
+- **网络监听模式** — listen_start/stop + wait_data_packet 抓包；请求级控制（继续/重定向/拒绝）走 InterceptGuard
 - **设备模拟** — 设备像素比/触摸模式/地理位置+刷新
 - **资源分析** — links/images/ele_count 一键提取页面资源
 - **网络控制** — URL 拦截/离线模式/清除缓存/禁用图片
@@ -615,16 +615,27 @@ el.is_in_viewport().await;   // 是否在可视区内
 el.is_alive().await;          // 是否仍挂在 DOM 上
 ```
 
-### 网络监听模式 (4) — iter10
+### 网络监听模式 — iter10
 
 ```rust
 page.listen_start().await?;                              // 开启网络监听
 // ... 用户操作 ...
 let reqs = page.network_monitor().requests();            // 获取捕获的请求
+let pkt = page.wait_data_packet("/api/", 10).await?;     // 等一个完整响应（含 body）
 page.listen_stop().await?;                               // 停止监听
-page.continue_request("req_id", None).await?;            // 继续请求
-page.continue_request("req_id", Some("https://new.url")).await?; // 重定向
-page.fail_request("req_id").await?;                      // 拒绝请求
+```
+
+请求级控制（继续 / 重定向 / 拒绝）通过 `enable_intercept` 返回的 `InterceptGuard`：
+
+```rust
+let guard = page.enable_intercept("*://*/api/*").await?;
+for req in guard.paused_requests() {
+    let id = req.request_id.to_string();
+    guard.continue_request(&id, None).await?;                 // 继续
+    // guard.continue_request(&id, Some("https://new.url")).await?; // 重定向
+    // guard.fail_request(&id).await?;                            // 拒绝
+}
+guard.disable().await?;                                  // 或 drop(guard) 自动关闭
 ```
 
 ### 设备模拟 + 网络控制 (9) — iter10
