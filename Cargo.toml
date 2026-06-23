@@ -5,6 +5,10 @@ edition = "2021"
 description = "A Rust browser automation library inspired by DrissionPage"
 license = "MIT"
 repository = "https://github.com/hithotmay/rpage"
+documentation = "https://docs.rs/rpage"
+readme = "README.md"
+keywords = ["browser", "automation", "chrome", "cdp", "scraping"]
+categories = ["web-programming", "api-bindings"]
 
 [dependencies]
 chromiumoxide = { version = "0.9", features = ["fetcher", "zip0"] }

@@ -2334,7 +2334,7 @@ impl ChromiumPage {
     /// Register a named init script that runs on every new document.
     ///
     /// The script is stored locally and registered via
-    /// `Page.addScriptToEvaluateOnNewDocument`.  Use [`remove_init_script`]
+    /// `Page.addScriptToEvaluateOnNewDocument`.  Use `remove_init_script`
     /// to unregister it later.
     pub async fn add_init_script(&self, name: &str, js: &str) -> Result<()> {
         let params = AddScriptToEvaluateOnNewDocumentParams::new(js);
@@ -4247,7 +4247,8 @@ impl ChromiumPage {
     /// Start listening for all network requests and responses.
     ///
     /// Ensures that the CDP `Network.enable` domain has been enabled so that
-    /// request/response events are captured by the internal [`NetworkMonitor`].
+    /// request/response events are captured by the internal
+    /// [`NetworkMonitor`](crate::NetworkMonitor).
     /// Sets the listen-mode flag to `true`.
     ///
     /// ```ignore
@@ -4268,7 +4269,7 @@ impl ChromiumPage {
     /// Stop the high-level listen mode.
     ///
     /// Clears the listen-mode flag. Does **not** clear recorded
-    /// requests/responses — use [`clear_network_records`](Self::clear_network_records)
+    /// requests/responses — use `network_monitor().clear()`
     /// for that.
     ///
     /// ```ignore
@@ -4325,7 +4326,7 @@ impl ChromiumPage {
 
     /// Return all recorded request packets whose URL contains `url_pattern`.
     ///
-    /// Each packet is a lightweight [`RequestInfo`] containing the URL, method,
+    /// Each packet is a lightweight [`RequestInfo`](crate::RequestInfo) containing the URL, method,
     /// resource type, and request ID.
     ///
     /// ```ignore
@@ -4348,7 +4349,7 @@ impl ChromiumPage {
 
     /// Return all recorded response packets whose URL contains `url_pattern`.
     ///
-    /// Each packet is a lightweight [`ResponseInfo`] containing the URL, status
+    /// Each packet is a lightweight [`ResponseInfo`](crate::ResponseInfo) containing the URL, status
     /// code, MIME type, and request ID.
     ///
     /// ```ignore
@@ -4987,7 +4988,7 @@ impl ChromiumPage {
 
     /// Activate a tab by partial URL match.
     ///
-    /// Same as [`activate_tab`] but matches against the tab URL instead of title.
+    /// Same as `activate_tab` but matches against the tab URL instead of title.
     pub async fn activate_tab_by_url(&self, keyword: &str) -> Result<()> {
         let tabs = self.tabs().await?;
         let urls = self.tab_urls().await?;
