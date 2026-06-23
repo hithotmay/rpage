@@ -365,6 +365,32 @@ impl ResponseBody {
     }
 }
 
+/// A captured request/response pair, as returned by
+/// [`ChromiumPage::wait_data_packet`]. This is rpage's equivalent of
+/// DrissionPage's `DataPacket`: the request metadata, the response metadata,
+/// and the actual response body (when Chrome still had it available).
+#[derive(Debug, Clone)]
+pub struct DataPacket {
+    pub url: String,
+    pub method: String,
+    pub status: u16,
+    pub resource_type: String,
+    pub request_id: String,
+    pub mime_type: String,
+    pub request_headers: HashMap<String, String>,
+    pub response_headers: HashMap<String, String>,
+    /// The response body, or `None` for bodies Chrome no longer retains
+    /// (redirects, 204s, evicted entries).
+    pub response_body: Option<ResponseBody>,
+}
+
+impl DataPacket {
+    /// Convenience: the response body as text (empty string if not captured).
+    pub fn body_text(&self) -> String {
+        self.response_body.as_ref().map(|b| b.text()).unwrap_or_default()
+    }
+}
+
 impl ChromiumPage {
     /// **启动浏览器并接管** — 一个函数搞定，零自动化标记，永不触发验证码。
     ///
@@ -4079,6 +4105,83 @@ impl ChromiumPage {
                 request_id: rec.request_id,
             })
             .collect()
+    }
+
+    /// Wait for a response whose URL contains `url_pattern`, then capture its
+    /// body and assemble a full [`DataPacket`] (request + response metadata +
+    /// body). This is rpage's equivalent of DrissionPage's `page.listen.wait()`
+    /// — the typical way to grab an XHR/fetch JSON payload triggered by a click.
+    ///
+    /// Requires monitoring to be enabled (the default for `with_options`).
+    /// Once a matching response is seen, the body is fetched with a short
+    /// retry window, since `Network.getResponseBody` only succeeds after the
+    /// response has finished loading. `response_body` is `None` if the body
+    /// was never retained (redirects, 204s, evicted entries).
+    ///
+    /// ```ignore
+    /// page.listen_start().await?;
+    /// page.ele("#load").await?.click().await?;
+    /// let pkt = page.wait_data_packet("/api/data", 10).await?;
+    /// println!("{} {} -> {}", pkt.status, pkt.url, pkt.body_text());
+    /// ```
+    pub async fn wait_data_packet(
+        &self,
+        url_pattern: &str,
+        timeout_secs: u64,
+    ) -> Result<DataPacket> {
+        let start = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(timeout_secs);
+        loop {
+            if let Some(resp) = self
+                .network_monitor
+                .find_responses_by_url(url_pattern)
+                .into_iter()
+                .last()
+            {
+                let req = self
+                    .network_monitor
+                    .requests()
+                    .into_iter()
+                    .rev()
+                    .find(|r| r.request_id == resp.request_id);
+
+                // The body isn't available until loadingFinished; retry briefly.
+                let mut response_body = None;
+                let body_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(2000);
+                loop {
+                    if let Ok(b) = self.get_response_body(&resp.request_id).await {
+                        response_body = Some(b);
+                        break;
+                    }
+                    if std::time::Instant::now() >= body_deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+
+                let (method, resource_type, request_headers) = req
+                    .map(|r| (r.method, r.resource_type, r.headers))
+                    .unwrap_or_else(|| (String::new(), String::new(), HashMap::new()));
+                return Ok(DataPacket {
+                    url: resp.url,
+                    method,
+                    status: resp.status,
+                    resource_type,
+                    request_id: resp.request_id,
+                    mime_type: resp.mime_type,
+                    request_headers,
+                    response_headers: resp.headers,
+                    response_body,
+                });
+            }
+            if start.elapsed() > deadline {
+                return Err(Error::Timeout(format!(
+                    "wait_data_packet({url_pattern}) timed out"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     // ── DrissionPage 缺失功能补全 ─────────────────────────────

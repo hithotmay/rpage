@@ -585,6 +585,18 @@ for r in page.get_responses("/api/") {
 }
 ```
 
+### 监听抓包 DataPacket (DrissionPage `listen.wait()` 对标)
+
+一步等待匹配 URL 的响应并抓取完整请求/响应（含响应体）：
+
+```rust
+page.listen_start().await?;
+page.ele("#load").await?.click().await?;     // 触发 XHR / fetch
+let pkt = page.wait_data_packet("/api/data", 10).await?;
+println!("{} {} -> {}", pkt.status, pkt.url, pkt.body_text());
+// pkt.method / status / mime_type / request_headers / response_headers / response_body
+```
+
 ### 元素状态 (DrissionPage `states` 对标)
 
 ```rust

@@ -180,6 +180,16 @@ async fn main() -> rpage::Result<()> {
         r.check("get_response_body", false, "no api response to fetch");
     }
 
+    // ── wait_data_packet (DrissionPage listen.wait() parity) ──
+    match page.wait_data_packet("/api/data", 5).await {
+        Ok(pkt) => r.check(
+            "wait_data_packet",
+            pkt.status == 200 && pkt.body_text().contains("hello"),
+            format!("status={} body={}", pkt.status, pkt.body_text()),
+        ),
+        Err(e) => r.check("wait_data_packet", false, e.to_string()),
+    }
+
     // ── right_click / double_click (real CDP mouse events) ──
     page.ele("#rc").await?.right_click().await?;
     page.sleep(Duration::from_millis(150)).await;

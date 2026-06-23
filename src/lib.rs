@@ -30,8 +30,8 @@ pub mod prelude;
 // Re-export key types at crate root
 pub use chromium_page::ChromiumPage;
 pub use chromium_page::{
-    ActionChain, CookieInfo, FileChooserInfo, FrameContext, InterceptGuard, InterceptedRequest,
-    PdfOptions, ResponseBody,
+    ActionChain, CookieInfo, DataPacket, FileChooserInfo, FrameContext, InterceptGuard,
+    InterceptedRequest, PdfOptions, ResponseBody,
 };
 pub use config::{default_debug_port, ChromiumOptions, SessionOptions, WebPageOptions};
 pub use console::ConsoleMonitor;

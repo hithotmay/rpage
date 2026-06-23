@@ -199,6 +199,7 @@ impl SyncPage {
     pub fn clear_cache(&self) -> Result<()> { self.rt().block_on(self.inner.clear_cache()) }
     pub fn run_cdp(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> { self.rt().block_on(self.inner.run_cdp(method, params)) }
     pub fn get_response_body(&self, request_id: &str) -> Result<crate::chromium_page::ResponseBody> { self.rt().block_on(self.inner.get_response_body(request_id)) }
+    pub fn wait_data_packet(&self, url_pattern: &str, timeout_secs: u64) -> Result<crate::chromium_page::DataPacket> { self.rt().block_on(self.inner.wait_data_packet(url_pattern, timeout_secs)) }
     pub fn links(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.links()) }
     pub fn images(&self) -> Result<Vec<String>> { self.rt().block_on(self.inner.images()) }
     pub fn disable_images(&self) -> Result<()> { self.rt().block_on(self.inner.disable_images()) }
