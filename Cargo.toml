@@ -56,3 +56,11 @@ path = "examples/full_showcase.rs"
 [[example]]
 name = "sync_demo"
 path = "examples/sync_demo.rs"
+
+[[example]]
+name = "click_runoob"
+path = "examples/click_runoob.rs"
+
+[[example]]
+name = "click_debug"
+path = "examples/click_debug.rs"

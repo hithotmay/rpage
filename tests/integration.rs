@@ -647,3 +647,107 @@ async fn webpage_session_only() {
     let html = page.html().await.unwrap();
     assert!(html.contains("Herman Melville"));
 }
+
+// ═══════════════════════════════════════════════════════════
+// Process lifecycle: Drop must reap the spawned Chrome child
+// ═══════════════════════════════════════════════════════════
+//
+// Before the Drop impl, Chrome was launched with DETACHED_PROCESS and the
+// Child handle was dropped at the end of launch_and_connect, orphaning the
+// browser. These tests confirm the new Drop reaps it.
+//
+// Run manually (needs Chrome + Windows):
+//   cargo test --test integration -- --ignored drop_ --nocapture
+
+/// Spawn Chrome via with_options, then drop the page and verify the process
+/// we spawned is no longer alive.
+#[tokio::test]
+#[ignore]
+async fn drop_kills_spawned_chrome() {
+    use rpage::chromium_page::ChromiumPage;
+
+    // Unique port to avoid clashing with other running Chrome debug sessions.
+    let port: u16 = 19444;
+    let opts = ChromiumOptions::builder()
+        .headless(true)
+        .debug_port(port)
+        .user_data_dir(std::env::temp_dir().join(format!("rpage-drop-test-{port}")))
+        .build();
+
+    let page = match ChromiumPage::with_options(opts).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skip: Chrome unavailable: {e}");
+            return;
+        }
+    };
+    // Sanity: the page works.
+    let url = page.url().await.expect("page should respond before drop");
+    assert!(!url.is_empty(), "current url should be non-empty: {url:?}");
+
+    // We can't read the private child pid directly; instead probe the debug
+    // port. Before drop it must be reachable; after drop it must be closed.
+    assert!(
+        port_is_open(port),
+        "debug port {port} should be open while page is alive"
+    );
+
+    // Drop the page — Drop::drop should kill the owned Chrome child.
+    drop(page);
+
+    // Give the OS a moment to tear down the listening socket.
+    let mut reaped = false;
+    for _ in 0..40 {
+        if !port_is_open(port) {
+            reaped = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        reaped,
+        "debug port {port} still open after drop — Chrome was NOT reaped (Drop fix regressed?)"
+    );
+}
+
+/// `quit()` should reap the child, and a subsequent Drop must be a no-op
+/// (no double-kill, no panic).
+#[tokio::test]
+#[ignore]
+async fn quit_then_drop_is_idempotent() {
+    use rpage::chromium_page::ChromiumPage;
+
+    let port: u16 = 19445;
+    let opts = ChromiumOptions::builder()
+        .headless(true)
+        .debug_port(port)
+        .user_data_dir(std::env::temp_dir().join(format!("rpage-quit-test-{port}")))
+        .build();
+    let page = match ChromiumPage::with_options(opts).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skip: Chrome unavailable: {e}");
+            return;
+        }
+    };
+    // Explicit graceful quit (reaps child, clears child field).
+    page.quit().await.expect("quit should succeed");
+    // Port should close shortly after.
+    let mut closed = false;
+    for _ in 0..40 {
+        if !port_is_open(port) {
+            closed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(closed, "debug port {port} should close after quit()");
+
+    // Now drop: must not panic and must not try to kill again (child is None).
+    drop(page);
+    // If we reached here without panicking, the idempotency holds.
+}
+
+fn port_is_open(port: u16) -> bool {
+    std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+}

@@ -2,7 +2,7 @@
 //!
 //! 流程: 连接 Chrome → 遍历 29 个章节 → 提取正文 HTML → 合并 → 输出 PDF
 
-use rpage::ChromiumPage;
+use rpage::WebPage;
 
 const BASE: &str = "https://www.runoob.com";
 
@@ -69,12 +69,15 @@ const JS_EXTRACT: &str = r#"
 #[tokio::main]
 async fn main() {
     println!("📖 菜鸟教程 Rust 全教程 → PDF");
-    println!("   连接 http://127.0.0.1:9222 ...\n");
+    println!("   自动启动 Chrome 浏览器 ...\n");
 
-    let page = match ChromiumPage::connect("http://127.0.0.1:9222").await {
+    let page = match WebPage::new().await {
         Ok(p) => p,
-        Err(e) => { eprintln!("❌ 连接失败: {e}"); return; }
+        Err(e) => { eprintln!("❌ 启动浏览器失败: {e}"); return; }
     };
+    // WebPage 自动启动 Chrome 并连接，无需手动开浏览器
+    // 通过 chromium() 获取底层 ChromiumPage 来使用 PDF 等浏览器专属功能
+    // 但 WebPage 本身已有 get/ele/fill 等方法，可直接使用
 
     let total = CHAPTERS.len();
     let mut all_html = String::new();
@@ -174,22 +177,24 @@ blockquote { border-left: 4px solid #1a73e8; margin: 10px 0; padding: 10px 20px;
     all_html.push_str("\n</body></html>");
 
     // 保存合并后的 HTML
-    let html_path = "C:/Users/ZhouX/rpage/rust_tutorial.html";
-    let pdf_path = "C:/Users/ZhouX/rpage/rust_tutorial.pdf";
-    std::fs::write(html_path, &all_html).unwrap();
+    let output_dir = "C:/Users/18824/rpage";
+    std::fs::create_dir_all(output_dir).ok();
+    let html_path = format!("{}/rust_tutorial.html", output_dir);
+    let pdf_path = format!("{}/rust_tutorial.pdf", output_dir);
+    std::fs::write(&html_path, &all_html).unwrap();
     println!("\n📄 合并 HTML 已保存: {} ({} bytes)", html_path, all_html.len());
 
     // 加载合并后的 HTML 并生成 PDF
-    let file_url = format!("file:///C:/Users/ZhouX/rpage/rust_tutorial.html");
+    let file_url = format!("file:///{}", html_path);
     println!("🖨️  正在生成 PDF ...");
 
     page.get(&file_url).await.unwrap();
     page.wait_js("document.readyState === 'complete'", 10).await.ok();
     page.sleep(std::time::Duration::from_millis(1000)).await;
 
-    match page.pdf(pdf_path).await {
+    match page.pdf(&pdf_path).await {
         Ok(_) => {
-            let size = std::fs::metadata(pdf_path).map(|m| m.len()).unwrap_or(0);
+            let size = std::fs::metadata(&pdf_path).map(|m| m.len()).unwrap_or(0);
             println!("✅ PDF 已生成: {} ({} KB)", pdf_path, size / 1024);
         }
         Err(e) => {

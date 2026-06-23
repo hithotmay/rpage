@@ -412,7 +412,7 @@ impl SyncPage {
 // ── action chain ──────────────────────────────────────────────────────
 
 impl SyncPage {
-    pub fn actions(&self) -> ActionChain<'_> {
+    pub fn actions(&self) -> ActionChain {
         self.page().actions()
     }
 }
