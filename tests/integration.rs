@@ -558,7 +558,12 @@ fn spawn_http_server() -> u16 {
                     format!("{{\"cookies\":\"{cookie_hdr}\"}}"),
                 )
             } else {
-                ("404 Not Found", String::new(), "text/plain", "nope".to_string())
+                (
+                    "404 Not Found",
+                    String::new(),
+                    "text/plain",
+                    "nope".to_string(),
+                )
             };
             let resp = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{set_cookie}Connection: close\r\n\r\n{body}",

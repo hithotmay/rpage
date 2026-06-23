@@ -6,7 +6,8 @@ use rpage::prelude::*;
 /// 构建本地测试页面
 async fn build_local_page(cp: &ChromiumPage) -> Result<()> {
     cp.get("about:blank").await?;
-    cp.execute(r#"
+    cp.execute(
+        r#"
         document.title = 'rpage Demo';
         document.body.innerHTML = `
         <div id="container">
@@ -26,7 +27,9 @@ async fn build_local_page(cp: &ChromiumPage) -> Result<()> {
           <button type="button" id="btn-submit">Submit</button>
           <div style="height:2000px;background:#f0f0f0">Scroll Content</div>
         </div>`;
-    "#).await?;
+    "#,
+    )
+    .await?;
     cp.sleep(std::time::Duration::from_millis(300)).await;
     Ok(())
 }
@@ -91,7 +94,11 @@ async fn main() -> Result<()> {
 
     // 元素属性
     let link = cp.ele("tag:a").await?;
-    println!("  tag:a → tag={}, href={}", link.tag(), link.attr("href").unwrap_or_default());
+    println!(
+        "  tag:a → tag={}, href={}",
+        link.tag(),
+        link.attr("href").unwrap_or_default()
+    );
     println!("  #title html(): {}", h1.html());
     println!("  #title is_displayed(): {}", h1.is_displayed());
 
@@ -162,7 +169,10 @@ async fn main() -> Result<()> {
         // 只关闭新创建的标签
         match cp.close_tab(tabs1 - 1).await {
             Ok(()) => println!("  close_tab: ✅"),
-            Err(e) => println!("  close_tab: 跳过 ({})", e.to_string().chars().take(30).collect::<String>()),
+            Err(e) => println!(
+                "  close_tab: 跳过 ({})",
+                e.to_string().chars().take(30).collect::<String>()
+            ),
         }
     }
     println!();
@@ -181,7 +191,8 @@ async fn main() -> Result<()> {
                 path: Some("/".into()),
                 secure: false,
                 http_only: false,
-            }).await?;
+            })
+            .await?;
             println!("  set_cookie: session_id=abc123xyz");
 
             let cookies = cp.cookies().await?;
@@ -233,7 +244,9 @@ async fn main() -> Result<()> {
     println!("  paused_requests: {} 个", paused.len());
     for req in paused.iter().take(2) {
         println!("    {} {} ({:?})", req.method, req.url, req.resource_type);
-        guard.continue_request(req.request_id.as_ref(), None).await?;
+        guard
+            .continue_request(req.request_id.as_ref(), None)
+            .await?;
     }
     drop(guard);
     println!("  拦截已关闭\n");
@@ -256,7 +269,9 @@ async fn main() -> Result<()> {
 
     // 时区
     cp.set_timezone("Asia/Shanghai").await?;
-    let tz = cp.execute("Intl.DateTimeFormat().resolvedOptions().timeZone").await?;
+    let tz = cp
+        .execute("Intl.DateTimeFormat().resolvedOptions().timeZone")
+        .await?;
     println!("  set_timezone: {tz}");
 
     // 触摸
@@ -271,13 +286,15 @@ async fn main() -> Result<()> {
     cp.set_device_scale(1.0).await?;
 
     // User-Agent
-    cp.set_user_agent("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)").await?;
+    cp.set_user_agent("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)")
+        .await?;
     let ua = cp.execute("navigator.userAgent").await?;
     let ua_short: String = ua.to_string().chars().take(50).collect();
     println!("  set_user_agent: {ua_short}...");
 
     // 一键设备模拟
-    cp.emulate_device(375, 812, "Mozilla/5.0 (iPhone...)", 3.0, true).await?;
+    cp.emulate_device(375, 812, "Mozilla/5.0 (iPhone...)", 3.0, true)
+        .await?;
     println!("  emulate_device(iPhone): ✅");
 
     // 重置
@@ -344,19 +361,22 @@ async fn main() -> Result<()> {
     println!("  execute(40+2): {sum}");
 
     // run_async_js — 异步 JS
-    let async_r = cp.run_async_js(
-        "await new Promise(r => setTimeout(() => r('async done!'), 100))"
-    ).await?;
+    let async_r = cp
+        .run_async_js("await new Promise(r => setTimeout(() => r('async done!'), 100))")
+        .await?;
     println!("  run_async_js: {async_r}");
 
     // CSS 注入 + 移除
-    let css_id = cp.inject_css("h1 { color: red !important; text-decoration: underline; }").await?;
+    let css_id = cp
+        .inject_css("h1 { color: red !important; text-decoration: underline; }")
+        .await?;
     println!("  inject_css: h1 变红 (id={css_id})");
     cp.remove_css(&css_id).await?;
     println!("  remove_css: 已恢复");
 
     // Init Script (每个新页面自动执行)
-    cp.add_init_script("demo_marker", "window.__rpage_demo = 'injected!'").await?;
+    cp.add_init_script("demo_marker", "window.__rpage_demo = 'injected!'")
+        .await?;
     build_local_page(&cp).await?;
     let marker = cp.execute("window.__rpage_demo").await?;
     println!("  add_init_script: __rpage_demo = {marker}");
@@ -371,8 +391,10 @@ async fn main() -> Result<()> {
 
     // 窗口位置/大小
     let bounds = cp.get_window_bounds().await?;
-    println!("  窗口: left={}, top={}, width={}, height={}",
-        bounds.0, bounds.1, bounds.2, bounds.3);
+    println!(
+        "  窗口: left={}, top={}, width={}, height={}",
+        bounds.0, bounds.1, bounds.2, bounds.3
+    );
 
     cp.set_window_size(1024, 768).await?;
     let _b2 = cp.get_window_bounds().await?;
@@ -391,7 +413,8 @@ async fn main() -> Result<()> {
         .key_down("Shift")
         .press("a")
         .key_up("Shift")
-        .perform().await?;
+        .perform()
+        .await?;
     println!("  ActionChain: move→click→Shift+a→释放 ✅");
 
     cp.press("Escape").await?;
@@ -484,7 +507,14 @@ async fn main() -> Result<()> {
     // 离线模式
     cp.set_offline(true).await?;
     let offline_result = cp.get("https://example.com").await;
-    println!("  set_offline(true): get → {}", if offline_result.is_err() { "失败(预期)" } else { "成功" });
+    println!(
+        "  set_offline(true): get → {}",
+        if offline_result.is_err() {
+            "失败(预期)"
+        } else {
+            "成功"
+        }
+    );
     match cp.set_offline(false).await {
         Ok(()) => println!("  set_offline(false): ✅"),
         Err(_) => {

@@ -37,10 +37,18 @@ async fn main() {
     println!("  评估 1: Token 效率 (数据精简度)");
     println!("{}", "═".repeat(60));
 
-    let url = format!("file:///{}/examples/showcase_page.html",
-        std::env::current_dir().unwrap().to_str().unwrap().replace('\\', "/"));
+    let url = format!(
+        "file:///{}/examples/showcase_page.html",
+        std::env::current_dir()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace('\\', "/")
+    );
     page.get(&url).await.unwrap();
-    page.wait_js("document.readyState === 'complete'", 5).await.ok();
+    page.wait_js("document.readyState === 'complete'", 5)
+        .await
+        .ok();
 
     let snapshot = page.page_snapshot().await.unwrap();
     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
@@ -51,7 +59,10 @@ async fn main() {
     println!("  - Title: {}", snapshot.title);
     println!("  - Viewport: {}", snapshot.viewport_size);
     println!("  - Scroll: {}", snapshot.scroll_position);
-    println!("  - Interactive elements: {} 个", snapshot.interactive_elements.len());
+    println!(
+        "  - Interactive elements: {} 个",
+        snapshot.interactive_elements.len()
+    );
     println!("  - Visible text: {} chars", snapshot.visible_text.len());
 
     // 评分: <2KB 优秀, <5KB 良好, <10KB 可接受, >10KB 冗余
@@ -86,36 +97,50 @@ async fn main() {
 
     for el in &elements {
         let vis = if el.is_visible { "👁" } else { "🚫" };
-        println!("    {vis} [{}] name='{}' type='{}' text='{:.30}'",
-            el.tag, el.name, el.input_type,
-            el.text.chars().take(30).collect::<String>());
+        println!(
+            "    {vis} [{}] name='{}' type='{}' text='{:.30}'",
+            el.tag,
+            el.name,
+            el.input_type,
+            el.text.chars().take(30).collect::<String>()
+        );
 
-        if el.tag == "button" { has_clickable = true; }
-        if el.tag == "input" { has_input = true; }
-        if el.tag == "a" { has_link = true; }
-        if el.tag == "select" { has_select = true; }
-        if el.is_visible { visible_count += 1; }
+        if el.tag == "button" {
+            has_clickable = true;
+        }
+        if el.tag == "input" {
+            has_input = true;
+        }
+        if el.tag == "a" {
+            has_link = true;
+        }
+        if el.tag == "select" {
+            has_select = true;
+        }
+        if el.is_visible {
+            visible_count += 1;
+        }
         if el.rect.w == 0.0 && el.rect.h == 0.0 && el.is_visible {
             has_rect = false;
         }
     }
 
     let type_coverage = [has_clickable, has_input, has_link, has_select]
-        .iter().filter(|&&x| x).count();
+        .iter()
+        .filter(|&&x| x)
+        .count();
 
     let (score, comment) = match type_coverage {
-        4 if has_rect && visible_count > 0 =>
-            (10, "完美: 覆盖所有类型，rect/visibility 准确"),
-        3..=4 =>
-            (8, "良好: 覆盖主要类型，部分信息不完整"),
-        2 =>
-            (6, "一般: 缺少重要元素类型"),
-        _ =>
-            (3, "不足: 元素发现不完整"),
+        4 if has_rect && visible_count > 0 => (10, "完美: 覆盖所有类型，rect/visibility 准确"),
+        3..=4 => (8, "良好: 覆盖主要类型，部分信息不完整"),
+        2 => (6, "一般: 缺少重要元素类型"),
+        _ => (3, "不足: 元素发现不完整"),
     };
     scores.push(("元素发现精确度", score, comment));
-    println!("  类型覆盖: button={}, input={}, link={}, select={}",
-        has_clickable, has_input, has_link, has_select);
+    println!(
+        "  类型覆盖: button={}, input={}, link={}, select={}",
+        has_clickable, has_input, has_link, has_select
+    );
     println!("  可见性: {visible_count}/{} 可见", elements.len());
     println!("  位置信息: {}", if has_rect { "准确" } else { "缺失" });
     println!("  → 评分: {score}/10 — {comment}\n");
@@ -129,8 +154,11 @@ async fn main() {
 
     // 测试 1: 精确文本匹配
     let r1 = page.smart_click("提交").await;
-    println!("  smart_click('提交'): success={}, url_changed={}",
-        r1.success, r1.before_url != r1.after_url);
+    println!(
+        "  smart_click('提交'): success={}, url_changed={}",
+        r1.success,
+        r1.before_url != r1.after_url
+    );
 
     page.smart_click("重置").await;
 
@@ -142,14 +170,17 @@ async fn main() {
 
     // 测试 3: 不存在的元素
     let r3 = page.smart_click("不存在的按钮XYZ").await;
-    println!("  smart_click('不存在元素'): success={}, error={:?}",
-        r3.success, r3.error);
+    println!(
+        "  smart_click('不存在元素'): success={}, error={:?}",
+        r3.success, r3.error
+    );
 
     // 测试 4: 多策略覆盖 (text= → text*= → css)
     let r4 = page.smart_click("重置").await;
     println!("  smart_click('重置'): success={}", r4.success);
 
-    let click_score = if r1.success && r2.success && !r3.success && r3.error.is_some() && r4.success {
+    let click_score = if r1.success && r2.success && !r3.success && r3.error.is_some() && r4.success
+    {
         (9, "优秀: 精确匹配/CSS/不存在元素/多策略均正确")
     } else if r1.success && r2.success {
         (7, "良好: 基本功能正确，但容错不够")
@@ -180,10 +211,16 @@ async fn main() {
     for (field, value) in &fill_tests {
         let r = page.smart_fill(field, value).await;
         let status = if r.success { "✅" } else { "❌" };
-        println!("  smart_fill('{}', '{}'): {} success={}",
-            field, value, status, r.success);
-        if *field != "不存在的字段xyz" && r.success { fill_pass += 1; }
-        if *field == "不存在的字段xyz" && !r.success { fill_pass += 1; }
+        println!(
+            "  smart_fill('{}', '{}'): {} success={}",
+            field, value, status, r.success
+        );
+        if *field != "不存在的字段xyz" && r.success {
+            fill_pass += 1;
+        }
+        if *field == "不存在的字段xyz" && !r.success {
+            fill_pass += 1;
+        }
     }
 
     let (score, comment) = if fill_pass == fill_total {
@@ -214,8 +251,12 @@ async fn main() {
     }
     println!("  Forms: {} 个", summary.forms.len());
     for form in &summary.forms {
-        println!("    action={} method={} fields={}",
-            form.action, form.method, form.fields.len());
+        println!(
+            "    action={} method={} fields={}",
+            form.action,
+            form.method,
+            form.fields.len()
+        );
         for f in &form.fields {
             println!("      - name={} type={}", f.name, f.field_type);
         }
@@ -244,32 +285,53 @@ async fn main() {
 
     // wait_js 测试
     let t = Instant::now();
-    let r = page.wait_js("document.querySelectorAll('button').length > 0", 3).await;
+    let r = page
+        .wait_js("document.querySelectorAll('button').length > 0", 3)
+        .await;
     let js_time = t.elapsed();
-    println!("  wait_js(按钮存在): {:?} ({:.0}ms)", r.is_ok(), js_time.as_millis());
+    println!(
+        "  wait_js(按钮存在): {:?} ({:.0}ms)",
+        r.is_ok(),
+        js_time.as_millis()
+    );
 
     // wait_ele 测试
     let t = Instant::now();
     let r = page.wait_ele("#main-title", 3).await;
     let ele_time = t.elapsed();
-    println!("  wait_ele('#main-title'): {:?} ({:.0}ms)", r.is_ok(), ele_time.as_millis());
+    println!(
+        "  wait_ele('#main-title'): {:?} ({:.0}ms)",
+        r.is_ok(),
+        ele_time.as_millis()
+    );
 
     // wait_title_contains 测试
     let r = page.wait_title_contains("rpage", 3).await;
     println!("  wait_title_contains('rpage'): {:?}", r.is_ok());
 
     // auto_retry 测试
-    let r: Result<String, _> = page.auto_retry(|| async {
-        Ok(page.title().await.unwrap_or_default())
-    }, 3, 100).await;
+    let r: Result<String, _> = page
+        .auto_retry(
+            || async { Ok(page.title().await.unwrap_or_default()) },
+            3,
+            100,
+        )
+        .await;
     println!("  auto_retry(title): {:?}", r.is_ok());
 
     // safe_nav 测试
     let r = page.safe_refresh().await;
     println!("  safe_refresh(): {:?}", r.is_ok());
 
-    let stability_count = [r.is_ok(), true, js_time.as_millis() < 1000,
-        ele_time.as_millis() < 1000].iter().filter(|&&x| x).count();
+    let stability_count = [
+        r.is_ok(),
+        true,
+        js_time.as_millis() < 1000,
+        ele_time.as_millis() < 1000,
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
 
     let (score, comment) = match stability_count {
         4 => (9, "优秀: 等待机制全面且快速"),
@@ -293,7 +355,9 @@ async fn main() {
             println!("  导航成功: {:.0}ms", nav_time.as_millis());
 
             // 等待加载
-            page.wait_js("document.readyState === 'complete'", 5).await.ok();
+            page.wait_js("document.readyState === 'complete'", 5)
+                .await
+                .ok();
 
             // 测试 page_snapshot 在真实网站
             let t2 = Instant::now();
@@ -301,10 +365,20 @@ async fn main() {
                 Ok(snap) => {
                     let snap_time = t2.elapsed();
                     let json_size = serde_json::to_string(&snap).unwrap().len();
-                    println!("  page_snapshot: {:.0}ms, {} bytes", snap_time.as_millis(), json_size);
+                    println!(
+                        "  page_snapshot: {:.0}ms, {} bytes",
+                        snap_time.as_millis(),
+                        json_size
+                    );
                     println!("    title: {}", snap.title);
-                    println!("    interactive_elements: {} 个", snap.interactive_elements.len());
-                    println!("    visible_text: {:.60}...", snap.visible_text.chars().take(60).collect::<String>());
+                    println!(
+                        "    interactive_elements: {} 个",
+                        snap.interactive_elements.len()
+                    );
+                    println!(
+                        "    visible_text: {:.60}...",
+                        snap.visible_text.chars().take(60).collect::<String>()
+                    );
                 }
                 Err(e) => println!("  page_snapshot 失败: {e}"),
             }
@@ -314,16 +388,26 @@ async fn main() {
                 Ok(elems) => {
                     println!("  interactive_elements: {} 个", elems.len());
                     for el in &elems {
-                        println!("    [{}] text='{:.30}' href='{}'",
+                        println!(
+                            "    [{}] text='{:.30}' href='{}'",
                             el.tag,
                             el.text.chars().take(30).collect::<String>(),
-                            el.href);
+                            el.href
+                        );
                     }
-                    scores.push(("真实网站兼容", 9, "优秀: 真实网站 page_snapshot/interactive_elements 正常"));
+                    scores.push((
+                        "真实网站兼容",
+                        9,
+                        "优秀: 真实网站 page_snapshot/interactive_elements 正常",
+                    ));
                 }
                 Err(e) => {
                     println!("  interactive_elements 失败: {e}");
-                    scores.push(("真实网站兼容", 6, "一般: interactive_elements 在真实网站失败"));
+                    scores.push((
+                        "真实网站兼容",
+                        6,
+                        "一般: interactive_elements 在真实网站失败",
+                    ));
                 }
             }
         }
@@ -343,12 +427,24 @@ async fn main() {
 
     let size_desc = format!("snapshot {} bytes", snapshot_bytes);
     let api_checks: Vec<(&str, bool, &str)> = vec![
-        ("方法名语义化", true, "smart_click/smart_fill/page_snapshot 自解释"),
-        ("返回结构化类型", true, "ActionAttempt/PageSnapshot/PageSummary 强类型"),
+        (
+            "方法名语义化",
+            true,
+            "smart_click/smart_fill/page_snapshot 自解释",
+        ),
+        (
+            "返回结构化类型",
+            true,
+            "ActionAttempt/PageSnapshot/PageSummary 强类型",
+        ),
         ("容错不 panic", true, "smart_click 失败返回 success=false"),
         ("不需要底层 CDP 知识", true, "Agent 只需高层 API"),
         ("数据量可控", snapshot_bytes < 5000, &size_desc),
-        ("批量操作支持", true, "auto_retry / interactive_elements 批量"),
+        (
+            "批量操作支持",
+            true,
+            "auto_retry / interactive_elements 批量",
+        ),
         ("URL 变化追踪", true, "ActionAttempt 含 before/after_url"),
         ("等待/轮询内建", true, "wait_ele/wait_js/wait_network_idle"),
     ];
@@ -358,7 +454,9 @@ async fn main() {
     for (name, pass, desc) in &api_checks {
         let mark = if *pass { "✅" } else { "❌" };
         println!("  {mark} {name}: {desc}");
-        if *pass { api_pass += 1; }
+        if *pass {
+            api_pass += 1;
+        }
     }
 
     let (score, comment) = match api_pass {

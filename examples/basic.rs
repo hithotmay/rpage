@@ -3,10 +3,9 @@ use rpage::WebPage;
 
 #[tokio::main]
 async fn main() -> rpage::Result<()> {
-
     let page = WebPage::new().await?;
     // let page = ChromiumPage::connect("http://localhost:9222").await?;
-    for _i in 1..2{
+    for _i in 1..2 {
         page.activate_tab("Example").await?;
         // page.get("https://example.com").await?;
 

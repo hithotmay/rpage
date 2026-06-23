@@ -86,21 +86,49 @@ fn main() -> rpage::Result<()> {
 
     p.get(&base)?;
     check("title", p.title()? == "Sync Smoke", p.title()?);
-    check("ele.text", p.ele("#title")?.text() == "RPage 测试", p.ele("#title")?.text().into());
-    check("s_ele.text", p.s_ele("#title")?.text() == "RPage 测试", p.s_ele("#title")?.text().into());
-    check("tab_count", p.tab_count()? >= 1, format!("{}", p.tab_count()?));
-    check("load_strategy", !p.load_strategy().is_empty(), p.load_strategy().into());
-    check("is_in_viewport", p.ele("#title")?.is_in_viewport(), "#title".into());
+    check(
+        "ele.text",
+        p.ele("#title")?.text() == "RPage 测试",
+        p.ele("#title")?.text().into(),
+    );
+    check(
+        "s_ele.text",
+        p.s_ele("#title")?.text() == "RPage 测试",
+        p.s_ele("#title")?.text().into(),
+    );
+    check(
+        "tab_count",
+        p.tab_count()? >= 1,
+        format!("{}", p.tab_count()?),
+    );
+    check(
+        "load_strategy",
+        !p.load_strategy().is_empty(),
+        p.load_strategy().into(),
+    );
+    check(
+        "is_in_viewport",
+        p.ele("#title")?.is_in_viewport(),
+        "#title".into(),
+    );
     check("is_alive", p.ele("#title")?.is_alive(), "#title".into());
 
     // console capture (the page logs on load)
     let logs = p.console_log();
-    check("console_log", logs.iter().any(|l| l.text.contains("sync-smoke-ready")), format!("{} entries", logs.len()));
+    check(
+        "console_log",
+        logs.iter().any(|l| l.text.contains("sync-smoke-ready")),
+        format!("{} entries", logs.len()),
+    );
 
     // click → fetch → wait_data_packet (the deadlock-risk path)
     p.ele("#btn")?.click()?;
     match p.wait_data_packet("/api/data", 5) {
-        Ok(pkt) => check("wait_data_packet", pkt.body_text().contains("hello-sync"), format!("{} {}", pkt.status, pkt.body_text())),
+        Ok(pkt) => check(
+            "wait_data_packet",
+            pkt.body_text().contains("hello-sync"),
+            format!("{} {}", pkt.status, pkt.body_text()),
+        ),
         Err(e) => check("wait_data_packet", false, e.to_string()),
     }
 

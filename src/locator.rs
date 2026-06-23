@@ -379,7 +379,9 @@ fn parse_single_locator(input: &str) -> Result<Locator> {
     if let Some(rest) = input.strip_prefix("text") {
         if let Some((op, value)) = split_match_op(rest) {
             if value.is_empty() {
-                return Err(Error::InvalidLocator("text matcher requires a value".into()));
+                return Err(Error::InvalidLocator(
+                    "text matcher requires a value".into(),
+                ));
             }
             let value = value.to_string();
             return Ok(match op {
@@ -679,7 +681,10 @@ mod tests {
     #[test]
     fn test_css_combined_selector() {
         let loc = parse_locator("css:#main .content > p:first-child").unwrap();
-        assert_eq!(loc, Locator::Css("#main .content > p:first-child".to_string()));
+        assert_eq!(
+            loc,
+            Locator::Css("#main .content > p:first-child".to_string())
+        );
     }
 
     #[test]
@@ -814,10 +819,7 @@ mod tests {
     fn test_or_xpath() {
         let loc = parse_locator("@|class=a@|class=b").unwrap();
         assert!(matches!(loc, Locator::Or(_)));
-        assert_eq!(
-            loc.to_xpath().unwrap(),
-            "//*[@class='a' or @class='b']"
-        );
+        assert_eq!(loc.to_xpath().unwrap(), "//*[@class='a' or @class='b']");
     }
 
     #[test]

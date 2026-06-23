@@ -24,8 +24,8 @@ pub mod js_helpers;
 pub mod sync_page;
 pub mod web_page;
 
-pub mod sync;
 pub mod prelude;
+pub mod sync;
 
 // Re-export key types at crate root
 pub use chromium_page::ChromiumPage;

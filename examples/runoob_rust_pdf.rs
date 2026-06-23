@@ -73,7 +73,10 @@ async fn main() {
 
     let page = match WebPage::new().await {
         Ok(p) => p,
-        Err(e) => { eprintln!("❌ 启动浏览器失败: {e}"); return; }
+        Err(e) => {
+            eprintln!("❌ 启动浏览器失败: {e}");
+            return;
+        }
     };
     // WebPage 自动启动 Chrome 并连接，无需手动开浏览器
     // 通过 chromium() 获取底层 ChromiumPage 来使用 PDF 等浏览器专属功能
@@ -119,12 +122,14 @@ blockquote { border-left: 4px solid #1a73e8; margin: 10px 0; padding: 10px 20px;
 "#);
 
     // 封面
-    all_html.push_str(r#"<div class="cover">
+    all_html.push_str(
+        r#"<div class="cover">
 <h1>🦀 Rust 完整教程</h1>
 <p class="subtitle">菜鸟教程 · 从入门到精通</p>
 <p class="meta">来源: runoob.com · 共 29 章</p>
 </div>
-"#);
+"#,
+    );
 
     // 目录
     all_html.push_str(r#"<div class="toc"><h2>📑 目录</h2><ol>"#);
@@ -141,7 +146,9 @@ blockquote { border-left: 4px solid #1a73e8; margin: 10px 0; padding: 10px 20px;
         match page.get(&url).await {
             Ok(_) => {
                 // 等待页面加载
-                page.wait_js("document.readyState === 'complete'", 8).await.ok();
+                page.wait_js("document.readyState === 'complete'", 8)
+                    .await
+                    .ok();
                 // 额外等待让动态内容加载
                 page.sleep(std::time::Duration::from_millis(500)).await;
 
@@ -152,7 +159,9 @@ blockquote { border-left: 4px solid #1a73e8; margin: 10px 0; padding: 10px 20px;
 
                         all_html.push_str(&format!(
                             "<div class=\"chapter-divider\">\n<h1>第 {} 章 · {}</h1>\n{}\n</div>\n",
-                            idx + 1, title, html
+                            idx + 1,
+                            title,
+                            html
                         ));
                     }
                     Err(e) => {
@@ -182,14 +191,20 @@ blockquote { border-left: 4px solid #1a73e8; margin: 10px 0; padding: 10px 20px;
     let html_path = format!("{}/rust_tutorial.html", output_dir);
     let pdf_path = format!("{}/rust_tutorial.pdf", output_dir);
     std::fs::write(&html_path, &all_html).unwrap();
-    println!("\n📄 合并 HTML 已保存: {} ({} bytes)", html_path, all_html.len());
+    println!(
+        "\n📄 合并 HTML 已保存: {} ({} bytes)",
+        html_path,
+        all_html.len()
+    );
 
     // 加载合并后的 HTML 并生成 PDF
     let file_url = format!("file:///{}", html_path);
     println!("🖨️  正在生成 PDF ...");
 
     page.get(&file_url).await.unwrap();
-    page.wait_js("document.readyState === 'complete'", 10).await.ok();
+    page.wait_js("document.readyState === 'complete'", 10)
+        .await
+        .ok();
     page.sleep(std::time::Duration::from_millis(1000)).await;
 
     match page.pdf(&pdf_path).await {

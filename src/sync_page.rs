@@ -147,7 +147,8 @@ impl SyncPage {
         expression: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        self.rt().block_on(self.page().run_js_with_args(expression, args))
+        self.rt()
+            .block_on(self.page().run_js_with_args(expression, args))
     }
 
     sync_fn!(pub fn evaluate_on_new_document(&self, js: &str) -> Result<()>);

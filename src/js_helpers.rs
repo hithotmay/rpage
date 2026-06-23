@@ -154,7 +154,10 @@ pub const JS_FORM_FIELDS: &str = r#"
 ///
 /// Uses `document.evaluate` with XPath `contains(text(), ...)`.
 pub fn js_find_by_text(text: &str) -> String {
-    let escaped = text.replace('\\', "\\\\").replace('\'', "\\'").replace('"', "\\\"");
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('"', "\\\"");
     format!(
         r#"(function() {{
     var txt = "{escaped}";

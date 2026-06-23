@@ -1,7 +1,7 @@
 //! rpage SyncPage 全面能力测试
 //! 覆盖 25 大类浏览器自动化场景
-use rpage::sync::SyncPage;
 use rpage::chromium_page::CookieInfo;
+use rpage::sync::SyncPage;
 use std::time::Duration;
 
 macro_rules! section {
@@ -55,7 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -69,16 +72,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let h1 = p.ele("#title")?;
         println!("  [OK] ele(#title): tag={}, text={}", h1.tag(), h1.text());
         println!("       html: {}", h1.html());
-        println!("       is_displayed={}, is_enabled={}", h1.is_displayed(), h1.is_enabled());
+        println!(
+            "       is_displayed={}, is_enabled={}",
+            h1.is_displayed(),
+            h1.is_enabled()
+        );
 
         let ps = p.eles("tag:p")?;
         println!("  [OK] eles(tag:p): {} 个", ps.len());
         for (i, el) in ps.iter().enumerate() {
-            println!("       [{}] {} (displayed={})", i, el.text(), el.is_displayed());
+            println!(
+                "       [{}] {} (displayed={})",
+                i,
+                el.text(),
+                el.is_displayed()
+            );
         }
 
         let maybe = p.ele_or_none("#nonexistent");
-        println!("  [OK] ele_or_none(#nonexistent): is_none={}", maybe.is_none());
+        println!(
+            "  [OK] ele_or_none(#nonexistent): is_none={}",
+            maybe.is_none()
+        );
 
         println!("  [OK] exists(h1): {}", p.exists("h1"));
         println!("  [OK] count(tag:p): {}", p.count("tag:p"));
@@ -91,7 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -131,7 +149,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -174,7 +195,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -188,15 +212,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let count = p.execute("document.querySelectorAll('p').length")?;
         println!("  [OK] execute: {} 个 <p>", count);
 
-        let async_r = p.run_async_js(
-            "await new Promise(r => setTimeout(() => r('async done!'), 100))"
-        )?;
+        let async_r =
+            p.run_async_js("await new Promise(r => setTimeout(() => r('async done!'), 100))")?;
         println!("  [OK] run_async_js: {}", async_r);
 
-        let sum = p.run_js_with_args(
-            "arguments[0] + arguments[1]",
-            serde_json::json!([10, 32])
-        )?;
+        let sum = p.run_js_with_args("arguments[0] + arguments[1]", serde_json::json!([10, 32]))?;
         println!("  [OK] run_js_with_args(10,32): {}", sum);
 
         p.evaluate_on_new_document("window.__injected = 42")?;
@@ -206,7 +226,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -240,7 +263,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -276,7 +302,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -312,7 +341,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -349,7 +381,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -361,7 +396,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         build_page(&p)?;
 
         let bounds = p.get_window_bounds()?;
-        println!("  [OK] get_window_bounds: left={} top={} w={} h={}", bounds.0, bounds.1, bounds.2, bounds.3);
+        println!(
+            "  [OK] get_window_bounds: left={} top={} w={} h={}",
+            bounds.0, bounds.1, bounds.2, bounds.3
+        );
 
         p.set_window_size(1024, 768)?;
         println!("  [OK] set_window_size(1024,768)");
@@ -374,7 +412,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -419,7 +460,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -442,7 +486,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -471,7 +518,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -485,7 +535,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elements = p.interactive_elements()?;
         println!("  [OK] interactive_elements: {} 个", elements.len());
         for el in elements.iter().take(5) {
-            println!("       {:?} {} (input_type={:?})", el.tag, el.text, el.input_type);
+            println!(
+                "       {:?} {} (input_type={:?})",
+                el.tag, el.text, el.input_type
+            );
         }
 
         let summary = p.page_summary()?;
@@ -499,11 +552,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  [OK] smart_click(Submit): success={}", result.success);
 
         let result = p.smart_fill("username", "智能填写");
-        println!("  [OK] smart_fill(username, 智能填写): success={}", result.success);
+        println!(
+            "  [OK] smart_fill(username, 智能填写): success={}",
+            result.success
+        );
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -529,7 +588,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -559,7 +621,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -584,7 +649,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -596,7 +664,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         build_page(&p)?;
 
         let container = p.ele("#container")?;
-        println!("  [OK] #container: tag={}, text_len={}", container.tag(), container.text().len());
+        println!(
+            "  [OK] #container: tag={}, text_len={}",
+            container.tag(),
+            container.text().len()
+        );
 
         let h1 = p.ele("#title")?;
         let parent = h1.parent()?;
@@ -606,7 +678,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  [OK] container.first_child(): tag={}", first.tag());
 
         let next = first.next()?;
-        println!("  [OK] first.next(): tag={} text={}", next.tag(), next.text());
+        println!(
+            "  [OK] first.next(): tag={} text={}",
+            next.tag(),
+            next.text()
+        );
 
         let prev = next.prev()?;
         println!("  [OK] next.prev(): tag={}", prev.tag());
@@ -619,7 +695,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -634,12 +713,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let frame_html = p.frame_html("#test-frame")?;
         println!("  [OK] frame_html: {} chars", frame_html.len());
 
-        let frame_result = p.frame_execute("#test-frame", "return this.document.querySelector('h2').textContent")?;
+        let frame_result = p.frame_execute(
+            "#test-frame",
+            "return this.document.querySelector('h2').textContent",
+        )?;
         println!("  [OK] frame_execute: h2 = {}", frame_result);
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -660,7 +745,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -678,7 +766,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -713,7 +804,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -732,7 +826,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -755,7 +852,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ══════════════════════════════════════════════════
@@ -774,12 +874,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })() {
         Ok(()) => pass += 1,
-        Err(e) => { fail += 1; println!("  [FAIL] {}", e); }
+        Err(e) => {
+            fail += 1;
+            println!("  [FAIL] {}", e);
+        }
     }
 
     // ── 汇总 ──
     println!("\n{}", "=".repeat(50));
-    println!("测试完成: {} 组通过 / {} 组失败 / {} 组总计", pass, fail, total);
+    println!(
+        "测试完成: {} 组通过 / {} 组失败 / {} 组总计",
+        pass, fail, total
+    );
     if fail == 0 {
         println!("全部通过！SyncPage 同步 API 完全可用。");
     } else {

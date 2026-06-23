@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use rpage::ChromiumPage;
 use rpage::config::ChromiumOptions;
+use rpage::ChromiumPage;
 
 const HTML: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>RPage Eval</title></head>
 <body>
@@ -143,13 +143,21 @@ async fn main() -> rpage::Result<()> {
 
     // ── Locators: CSS / text: / xpath: ──
     let t = page.ele("#title").await?;
-    r.check("ele(css).text", t.text() == "RPage 测试", t.text().to_string());
+    r.check(
+        "ele(css).text",
+        t.text() == "RPage 测试",
+        t.text().to_string(),
+    );
     match page.ele("text:点击我").await {
         Ok(e) => r.check("ele(text:)", e.tag() == "a", format!("tag={}", e.tag())),
         Err(e) => r.check("ele(text:)", false, e.to_string()),
     }
     match page.ele("xpath://h1").await {
-        Ok(e) => r.check("ele(xpath:)", e.text().contains("测试"), e.text().to_string()),
+        Ok(e) => r.check(
+            "ele(xpath:)",
+            e.text().contains("测试"),
+            e.text().to_string(),
+        ),
         Err(e) => r.check("ele(xpath:)", false, e.to_string()),
     }
 
@@ -287,25 +295,45 @@ async fn main() -> rpage::Result<()> {
         Err(e) => r.check("locator @@(AND)", false, e.to_string()),
     }
     match page.ele("@|id=nope@|data-testid=tid").await {
-        Ok(e) => r.check("locator @|(OR)", e.text() == "TID-VAL", e.text().to_string()),
+        Ok(e) => r.check(
+            "locator @|(OR)",
+            e.text() == "TID-VAL",
+            e.text().to_string(),
+        ),
         Err(e) => r.check("locator @|(OR)", false, e.to_string()),
     }
 
     // ── get_by_* semantic locators (Playwright) ──
     match page.get_by_placeholder("搜索").await {
-        Ok(e) => r.check("get_by_placeholder", e.attr("id") == Some("ph"), format!("{:?}", e.attr("id"))),
+        Ok(e) => r.check(
+            "get_by_placeholder",
+            e.attr("id") == Some("ph"),
+            format!("{:?}", e.attr("id")),
+        ),
         Err(e) => r.check("get_by_placeholder", false, e.to_string()),
     }
     match page.get_by_test_id("tid").await {
-        Ok(e) => r.check("get_by_test_id", e.text() == "TID-VAL", e.text().to_string()),
+        Ok(e) => r.check(
+            "get_by_test_id",
+            e.text() == "TID-VAL",
+            e.text().to_string(),
+        ),
         Err(e) => r.check("get_by_test_id", false, e.to_string()),
     }
     match page.get_by_role("button").await {
-        Ok(e) => r.check("get_by_role", e.tag() == "button", format!("tag={}", e.tag())),
+        Ok(e) => r.check(
+            "get_by_role",
+            e.tag() == "button",
+            format!("tag={}", e.tag()),
+        ),
         Err(e) => r.check("get_by_role", false, e.to_string()),
     }
     match page.get_by_label("用户名").await {
-        Ok(e) => r.check("get_by_label", e.attr("id") == Some("lbl"), format!("{:?}", e.attr("id"))),
+        Ok(e) => r.check(
+            "get_by_label",
+            e.attr("id") == Some("lbl"),
+            format!("{:?}", e.attr("id")),
+        ),
         Err(e) => r.check("get_by_label", false, e.to_string()),
     }
 

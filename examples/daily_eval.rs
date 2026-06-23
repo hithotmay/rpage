@@ -19,11 +19,20 @@ async fn main() {
 
     let page = match ChromiumPage::connect("http://127.0.0.1:9222").await {
         Ok(p) => p,
-        Err(e) => { eprintln!("❌ 连接失败: {e}"); return; }
+        Err(e) => {
+            eprintln!("❌ 连接失败: {e}");
+            return;
+        }
     };
 
-    let url = format!("file:///{}/examples/showcase_page.html",
-        std::env::current_dir().unwrap().to_str().unwrap().replace('\\', "/"));
+    let url = format!(
+        "file:///{}/examples/showcase_page.html",
+        std::env::current_dir()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace('\\', "/")
+    );
 
     let mut scores: Vec<(&str, i32, &str)> = vec![];
 
@@ -53,7 +62,10 @@ async fn main() {
     let el = page.ele("#main-title").await.unwrap();
     println!("    page.ele(\"#main-title\")?;// → <h1>");
     println!("    el.text()?;              // → \"{}\"", el.text());
-    println!("    el.html()?;              // → \"{}\"", el.html().chars().take(50).collect::<String>());
+    println!(
+        "    el.html()?;              // → \"{}\"",
+        el.html().chars().take(50).collect::<String>()
+    );
 
     // 填表单 (fill 支持 Unicode，input 仅 ASCII)
     let input = page.ele("input[name=username]").await.unwrap();
@@ -66,7 +78,10 @@ async fn main() {
 
     // 验证结果
     let status = page.ele("#status-bar").await.unwrap();
-    println!("    page.ele(\"#status-bar\")?.text(); // → \"{}\"", status.text());
+    println!(
+        "    page.ele(\"#status-bar\")?.text(); // → \"{}\"",
+        status.text()
+    );
     println!();
 
     let (score, comment) = (9, "优秀: 链式调用直觉，无需了解 CDP 底层");
@@ -101,10 +116,15 @@ async fn main() {
     println!("\n  [场景C] 属性提取:");
     println!("    tag: {}", el.tag());
     println!("    text: {}", el.text());
-    println!("    html: {}", el.html().chars().take(60).collect::<String>());
+    println!(
+        "    html: {}",
+        el.html().chars().take(60).collect::<String>()
+    );
 
     // 场景 D: 执行 JS 提取自定义数据
-    let data = page.execute(r#"
+    let data = page
+        .execute(
+            r#"
         (function(){
             var form = document.getElementById('login-form');
             var inputs = form.querySelectorAll('input, select, textarea');
@@ -118,7 +138,10 @@ async fn main() {
             }
             return JSON.stringify(fields);
         })()
-    "#).await.unwrap();
+    "#,
+        )
+        .await
+        .unwrap();
     println!("\n  [场景D] JS 提取表单数据: {}", data);
 
     // 场景 E: 全页面源码
@@ -144,17 +167,45 @@ async fn main() {
 
     println!("  [测试1] 表单完整流程:");
     // 填写
-    page.ele("input[name=username]").await.unwrap().input("testuser").await.unwrap();
-    page.ele("input[name=password]").await.unwrap().input("pass123").await.unwrap();
-    page.ele("input[name=email]").await.unwrap().input("test@test.com").await.unwrap();
+    page.ele("input[name=username]")
+        .await
+        .unwrap()
+        .input("testuser")
+        .await
+        .unwrap();
+    page.ele("input[name=password]")
+        .await
+        .unwrap()
+        .input("pass123")
+        .await
+        .unwrap();
+    page.ele("input[name=email]")
+        .await
+        .unwrap()
+        .input("test@test.com")
+        .await
+        .unwrap();
     let bio = page.ele("textarea[name=bio]").await.unwrap();
     bio.fill("这是测试简介").await.unwrap();
     println!("    ✅ 填写 4 个字段 + textarea (fill)");
 
     // 验证值
-    let username_val = page.ele("input[name=username]").await.unwrap().value().await.unwrap();
-    println!("    验证 username value = \"{}\" → {}", username_val,
-        if username_val == "testuser" { "✅" } else { "❌" });
+    let username_val = page
+        .ele("input[name=username]")
+        .await
+        .unwrap()
+        .value()
+        .await
+        .unwrap();
+    println!(
+        "    验证 username value = \"{}\" → {}",
+        username_val,
+        if username_val == "testuser" {
+            "✅"
+        } else {
+            "❌"
+        }
+    );
 
     // select
     let sel = page.ele("select[name=city]").await.unwrap();
@@ -171,25 +222,46 @@ async fn main() {
     let status = page.ele("#status-bar").await.unwrap();
     let status_text = status.text().to_string();
     let submit_ok = status_text.contains("已提交");
-    println!("    提交后状态: \"{}\" → {}", status_text, if submit_ok { "✅" } else { "❌" });
+    println!(
+        "    提交后状态: \"{}\" → {}",
+        status_text,
+        if submit_ok { "✅" } else { "❌" }
+    );
 
     // 重置
     page.click_ele("#btn-reset").await.unwrap();
     let status = page.ele("#status-bar").await.unwrap();
     let reset_ok = status.text().contains("已重置");
-    println!("    重置后状态: \"{}\" → {}", status.text(), if reset_ok { "✅" } else { "❌" });
+    println!(
+        "    重置后状态: \"{}\" → {}",
+        status.text(),
+        if reset_ok { "✅" } else { "❌" }
+    );
 
     // 等待断言
     println!("\n  [测试2] 等待断言:");
     let t = Instant::now();
     let wait_ok = page.wait_ele("#main-title", 3).await.is_ok();
-    println!("    wait_ele('#main-title', 3s): {} ({:.0}ms)", if wait_ok { "✅" } else { "❌" }, t.elapsed().as_millis());
+    println!(
+        "    wait_ele('#main-title', 3s): {} ({:.0}ms)",
+        if wait_ok { "✅" } else { "❌" },
+        t.elapsed().as_millis()
+    );
 
     let wait_ok = page.wait_title_contains("rpage", 3).await.is_ok();
-    println!("    wait_title_contains('rpage'): {}", if wait_ok { "✅" } else { "❌" });
+    println!(
+        "    wait_title_contains('rpage'): {}",
+        if wait_ok { "✅" } else { "❌" }
+    );
 
-    let wait_ok = page.wait_js("document.querySelectorAll('button').length >= 2", 3).await.is_ok();
-    println!("    wait_js('buttons >= 2'): {}", if wait_ok { "✅" } else { "❌" });
+    let wait_ok = page
+        .wait_js("document.querySelectorAll('button').length >= 2", 3)
+        .await
+        .is_ok();
+    println!(
+        "    wait_js('buttons >= 2'): {}",
+        if wait_ok { "✅" } else { "❌" }
+    );
 
     // exists 检查
     let exists = page.exists("#main-title").await;
@@ -214,17 +286,31 @@ async fn main() {
     let t = Instant::now();
     let png_bytes = page.screenshot_bytes().await.unwrap();
     let screenshot_time = t.elapsed();
-    println!("  screenshot_bytes(): {} bytes ({:.0}ms)", png_bytes.len(), screenshot_time.as_millis());
+    println!(
+        "  screenshot_bytes(): {} bytes ({:.0}ms)",
+        png_bytes.len(),
+        screenshot_time.as_millis()
+    );
 
     // 保存截图
-    let ss_path = format!("{}/rpage_daily_screenshot.png", std::env::temp_dir().to_str().unwrap());
+    let ss_path = format!(
+        "{}/rpage_daily_screenshot.png",
+        std::env::temp_dir().to_str().unwrap()
+    );
     let t = Instant::now();
     page.screenshot(&ss_path).await.unwrap();
-    println!("  screenshot('{}'): 保存成功 ({:.0}ms)", ss_path, t.elapsed().as_millis());
+    println!(
+        "  screenshot('{}'): 保存成功 ({:.0}ms)",
+        ss_path,
+        t.elapsed().as_millis()
+    );
 
     // 元素截图
     let el = page.ele("#main-title").await.unwrap();
-    let el_path = format!("{}/rpage_element_screenshot.png", std::env::temp_dir().to_str().unwrap());
+    let el_path = format!(
+        "{}/rpage_element_screenshot.png",
+        std::env::temp_dir().to_str().unwrap()
+    );
     match el.screenshot(&el_path).await {
         Ok(_) => println!("  el.screenshot(): ✅ 元素级截图"),
         Err(e) => println!("  el.screenshot(): ❌ {}", e),
@@ -256,17 +342,41 @@ async fn main() {
     println!("{}", "═".repeat(60));
 
     // 键盘快捷键
-    page.ele("input[name=username]").await.unwrap().click().await.unwrap();
+    page.ele("input[name=username]")
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
     page.press("Control+a").await.unwrap();
     page.press("Backspace").await.unwrap();
     page.keys("keyboard_input").await.unwrap();
-    let val = page.ele("input[name=username]").await.unwrap().value().await.unwrap();
-    println!("  keys('keyboard_input') → value='{}' → {}", val, if val == "keyboard_input" { "✅" } else { "❌" });
+    let val = page
+        .ele("input[name=username]")
+        .await
+        .unwrap()
+        .value()
+        .await
+        .unwrap();
+    println!(
+        "  keys('keyboard_input') → value='{}' → {}",
+        val,
+        if val == "keyboard_input" {
+            "✅"
+        } else {
+            "❌"
+        }
+    );
 
     // 复制粘贴
     page.select_all_text().await.unwrap();
     page.copy_text().await.ok();
-    page.ele("textarea[name=bio]").await.unwrap().click().await.unwrap();
+    page.ele("textarea[name=bio]")
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
     page.paste_text().await.ok();
 
     // 滚动
@@ -285,11 +395,17 @@ async fn main() {
     println!("  el.scroll_into_view(): ✅");
 
     let rect = el.rect().await.unwrap();
-    println!("  el.rect(): ({:.0},{:.0},{:.0},{:.0}) ✅", rect.0, rect.1, rect.2, rect.3);
+    println!(
+        "  el.rect(): ({:.0},{:.0},{:.0},{:.0}) ✅",
+        rect.0, rect.1, rect.2, rect.3
+    );
 
     let displayed = el.is_displayed();
     let visible = el.is_visible().await;
-    println!("  el.is_displayed()={}, is_visible()={} ✅", displayed, visible);
+    println!(
+        "  el.is_displayed()={}, is_visible()={} ✅",
+        displayed, visible
+    );
 
     // 右键/双击
     let btn = page.ele("#btn-submit").await.unwrap();
@@ -374,7 +490,10 @@ async fn main() {
     let el = page.ele("#main-title").await.unwrap();
 
     // 注入全局 CSS
-    let css_id = page.inject_css("h1 { text-decoration: underline; }").await.unwrap();
+    let css_id = page
+        .inject_css("h1 { text-decoration: underline; }")
+        .await
+        .unwrap();
     println!("  inject_css(): id={} ✅", css_id);
     page.remove_css(&css_id).await.unwrap();
     println!("  remove_css(): ✅");
@@ -395,7 +514,11 @@ async fn main() {
     el.set_attr("data-test", "value123").await.unwrap();
     println!("  el.set_attr('data-test','value123'): ✅");
 
-    scores.push(("CSS/样式操作", 9, "优秀: 全局CSS注入+元素级style/class/attr"));
+    scores.push((
+        "CSS/样式操作",
+        9,
+        "优秀: 全局CSS注入+元素级style/class/attr",
+    ));
     println!("  → 评分: 9/10 — 优秀\n");
 
     // ================================================================
@@ -432,13 +555,20 @@ async fn main() {
     // 截图速度
     let t = Instant::now();
     let ss_ok = page.screenshot_bytes().await.is_ok();
-    println!("  截图: {:.0}ms {}", t.elapsed().as_millis(), if ss_ok { "✅" } else { "❌" });
+    println!(
+        "  截图: {:.0}ms {}",
+        t.elapsed().as_millis(),
+        if ss_ok { "✅" } else { "❌" }
+    );
 
     // 性能指标
     let perf_ok = page.performance_metrics().await.is_ok();
     let timing_ok = page.page_timing().await.is_ok();
-    println!("  performance_metrics(): {} | page_timing(): {}",
-        if perf_ok { "✅" } else { "❌" }, if timing_ok { "✅" } else { "❌" });
+    println!(
+        "  performance_metrics(): {} | page_timing(): {}",
+        if perf_ok { "✅" } else { "❌" },
+        if timing_ok { "✅" } else { "❌" }
+    );
 
     let (score, comment) = if avg_nav < 200.0 && avg_find < 50.0 && avg_js < 20.0 {
         (9, "优秀: 响应迅速，无明显性能瓶颈")
@@ -464,15 +594,25 @@ async fn main() {
         ("Builder 模式", false, "缺少 set_xxx().set_yyy() 链式配置"),
         ("生命周期简单", true, "无需处理复杂的 'a 生命周期"),
         ("所有权模型直观", true, "Element 持有 page Arc clone"),
-        ("Option 合理使用", true, "ele_or_none() 返回 Option<Element>"),
-        ("impl block 组织", true, "所有方法在 ChromiumPage 上，无碎片化 trait"),
+        (
+            "Option 合理使用",
+            true,
+            "ele_or_none() 返回 Option<Element>",
+        ),
+        (
+            "impl block 组织",
+            true,
+            "所有方法在 ChromiumPage 上，无碎片化 trait",
+        ),
     ];
 
     let mut pass = 0;
     for (name, ok, desc) in &checks {
         let mark = if *ok { "✅" } else { "⚠️" };
         println!("  {mark} {name}: {desc}");
-        if *ok { pass += 1; }
+        if *ok {
+            pass += 1;
+        }
     }
 
     let (score, comment) = match pass {
@@ -492,13 +632,41 @@ async fn main() {
     println!("{}", "═".repeat(60));
 
     let pain_points = vec![
-        ("connect 模式需手动启 Chrome", true, "需用户先启动带 --remote-debugging-port 的 Chrome"),
-        ("close_tab 破坏 CDP session", true, "关闭标签后整个 CDP 连接断连"),
-        ("back()/forward() 不稳定", true, "CDP 刷新后 session 可能失效"),
-        ("file:// 限制 Cookie/网络", true, "本地文件协议下 Cookie/部分网络功能受限"),
-        ("text= 定位器需 XPath 回退", true, "非 CSS 定位器需额外 fallback 逻辑"),
-        ("无内置弹窗处理(非alert)", false, "alert/confirm 可处理, 自定义模态框需手动"),
-        ("无文件上传高级封装", false, "upload_file 存在但使用体验待优化"),
+        (
+            "connect 模式需手动启 Chrome",
+            true,
+            "需用户先启动带 --remote-debugging-port 的 Chrome",
+        ),
+        (
+            "close_tab 破坏 CDP session",
+            true,
+            "关闭标签后整个 CDP 连接断连",
+        ),
+        (
+            "back()/forward() 不稳定",
+            true,
+            "CDP 刷新后 session 可能失效",
+        ),
+        (
+            "file:// 限制 Cookie/网络",
+            true,
+            "本地文件协议下 Cookie/部分网络功能受限",
+        ),
+        (
+            "text= 定位器需 XPath 回退",
+            true,
+            "非 CSS 定位器需额外 fallback 逻辑",
+        ),
+        (
+            "无内置弹窗处理(非alert)",
+            false,
+            "alert/confirm 可处理, 自定义模态框需手动",
+        ),
+        (
+            "无文件上传高级封装",
+            false,
+            "upload_file 存在但使用体验待优化",
+        ),
         ("无并发标签操作", true, "同一 Page 对象不能并行操作多个标签"),
     ];
 
@@ -506,7 +674,9 @@ async fn main() {
     for (name, is_pain, desc) in &pain_points {
         let mark = if *is_pain { "⚠️" } else { "ℹ️" };
         println!("  {mark} {name}: {desc}");
-        if *is_pain { pain_count += 1; }
+        if *is_pain {
+            pain_count += 1;
+        }
     }
 
     let (score, comment) = match pain_count {

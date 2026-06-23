@@ -16,11 +16,15 @@ macro_rules! section {
 }
 
 macro_rules! ok {
-    ($msg:expr) => { println!("  ✅ {}", $msg) };
+    ($msg:expr) => {
+        println!("  ✅ {}", $msg)
+    };
 }
 
 macro_rules! info {
-    ($msg:expr) => { println!("  ℹ️  {}", $msg) }
+    ($msg:expr) => {
+        println!("  ℹ️  {}", $msg)
+    };
 }
 
 // 打开本地 HTML 测试页面（实体文件，比 JS 注入稳定得多）
@@ -81,7 +85,10 @@ async fn main() -> Result<()> {
 
         let buttons = cp.eles("tag:button").await?;
         assert_eq!(buttons.len(), 2);
-        ok!(format!("eles('tag:button') tag 选择器找到 {} 个按钮", buttons.len()));
+        ok!(format!(
+            "eles('tag:button') tag 选择器找到 {} 个按钮",
+            buttons.len()
+        ));
 
         // 链式选择器回退
         let btn = cp.ele("#btn-submit").await?;
@@ -126,8 +133,12 @@ async fn main() -> Result<()> {
         ok!("密码字段输入");
 
         // textarea — 中文用 JS 注入（CDP key dispatch 不支持非 ASCII）
-        cp.execute("document.querySelector('textarea[name=bio]').value = '这是自动填写的个人简介'").await?;
-        cp.execute("document.querySelector('textarea[name=bio]').dispatchEvent(new Event('input'))").await?;
+        cp.execute("document.querySelector('textarea[name=bio]').value = '这是自动填写的个人简介'")
+            .await?;
+        cp.execute(
+            "document.querySelector('textarea[name=bio]').dispatchEvent(new Event('input'))",
+        )
+        .await?;
         ok!("textarea 输入 (JS 注入)");
 
         // select
@@ -137,7 +148,8 @@ async fn main() -> Result<()> {
             Err(_) => ok!("select.select('gz') 跳过"),
         }
 
-        cp.type_text("input[name=email]", "test@example.com").await?;
+        cp.type_text("input[name=email]", "test@example.com")
+            .await?;
         ok!("page.type_text() 链式输入");
     }
 
@@ -149,7 +161,10 @@ async fn main() -> Result<()> {
         let btn = cp.ele("#btn-submit").await?;
         let displayed = btn.is_displayed();
         let visible = btn.is_visible().await;
-        ok!(format!("btn.is_displayed()={}, is_visible()={}", displayed, visible));
+        ok!(format!(
+            "btn.is_displayed()={}, is_visible()={}",
+            displayed, visible
+        ));
 
         btn.click().await?;
         let status_text = cp.ele("#status-bar").await?.text().to_string();
@@ -169,20 +184,25 @@ async fn main() -> Result<()> {
         assert_eq!(val, 42);
         ok!("execute('(40+2)') = 42");
 
-        cp.execute("document.getElementById('main-title').style.color='red'").await?;
+        cp.execute("document.getElementById('main-title').style.color='red'")
+            .await?;
         ok!("execute() 修改 DOM 样式");
 
         let stats = cp.execute("JSON.stringify({links: document.links.length, inputs: document.querySelectorAll('input').length, buttons: document.querySelectorAll('button').length})").await?;
         info!(format!("页面元素统计: {:?}", stats));
         ok!("execute() 复杂 JS 返回 JSON");
 
-        cp.evaluate_on_new_document("window.__injected = 42").await?;
+        cp.evaluate_on_new_document("window.__injected = 42")
+            .await?;
         ok!("evaluate_on_new_document() 注入脚本");
 
-        let async_val = cp.run_async_js("new Promise(r => setTimeout(() => r('async-ok'), 100))").await?;
+        let async_val = cp
+            .run_async_js("new Promise(r => setTimeout(() => r('async-ok'), 100))")
+            .await?;
         ok!(format!("run_async_js() 异步 JS → {:?}", async_val));
 
-        cp.add_init_script("showcase_init", "window.__init_script = true").await?;
+        cp.add_init_script("showcase_init", "window.__init_script = true")
+            .await?;
         ok!("add_init_script() 注册初始化脚本");
         cp.remove_init_script("showcase_init").await?;
         ok!("remove_init_script() 移除初始化脚本");
@@ -227,7 +247,8 @@ async fn main() -> Result<()> {
             path: Some("/".into()),
             secure: false,
             http_only: false,
-        }).await?;
+        })
+        .await?;
         ok!("set_cookie() 设置 cookie");
 
         let cookies = cp.cookies().await?;
@@ -266,7 +287,11 @@ async fn main() -> Result<()> {
 
                 cp.new_tab().await?;
                 let tabs_after = cp.tabs().await?;
-                ok!(format!("new_tab() → 标签数 {} → {}", tabs_before.len(), tabs_after.len()));
+                ok!(format!(
+                    "new_tab() → 标签数 {} → {}",
+                    tabs_before.len(),
+                    tabs_after.len()
+                ));
 
                 cp.switch_to_tab(idx).await?;
                 ok!(format!("switch_to_tab({}) 切回原标签", idx));
@@ -287,11 +312,17 @@ async fn main() -> Result<()> {
         let bytes = cp.screenshot_bytes().await?;
         ok!(format!("screenshot_bytes() → {} 字节 PNG", bytes.len()));
 
-        let ss_path = format!("{}/rpage_showcase_screenshot.png", std::env::temp_dir().to_str().unwrap());
+        let ss_path = format!(
+            "{}/rpage_showcase_screenshot.png",
+            std::env::temp_dir().to_str().unwrap()
+        );
         cp.screenshot(&ss_path).await?;
         ok!(format!("screenshot() 保存到 {}", ss_path));
 
-        let pdf_path = format!("{}/rpage_showcase.pdf", std::env::temp_dir().to_str().unwrap());
+        let pdf_path = format!(
+            "{}/rpage_showcase.pdf",
+            std::env::temp_dir().to_str().unwrap()
+        );
         cp.pdf(&pdf_path).await?;
         ok!(format!("pdf() 保存到 {}", pdf_path));
     }
@@ -401,16 +432,19 @@ async fn main() -> Result<()> {
         cp.wait_url_contains("showcase_page", 5).await?;
         ok!("wait_url_contains('showcase_page')");
 
-        cp.wait_js("document.getElementById('main-title') !== null", 5).await?;
+        cp.wait_js("document.getElementById('main-title') !== null", 5)
+            .await?;
         ok!("wait_js() 等待 JS 条件满足");
 
         // 隐藏 footer 再等待
-        cp.execute("document.getElementById('footer').style.display='none'").await?;
+        cp.execute("document.getElementById('footer').style.display='none'")
+            .await?;
         cp.wait_ele_hidden("#footer", 5).await?;
         ok!("wait_ele_hidden('#footer') 等待元素隐藏");
 
         // 删除 footer 再等待
-        cp.execute("document.getElementById('footer').remove()").await?;
+        cp.execute("document.getElementById('footer').remove()")
+            .await?;
         cp.wait_ele_deleted("#footer", 5).await?;
         ok!("wait_ele_deleted('#footer') 等待元素删除");
     }
@@ -422,10 +456,15 @@ async fn main() -> Result<()> {
     {
         // dom_snapshot
         let snap = cp.dom_snapshot().await?;
-        ok!(format!("dom_snapshot() DOM 树 ({} 字符)", format!("{:?}", snap).len()));
+        ok!(format!(
+            "dom_snapshot() DOM 树 ({} 字符)",
+            format!("{:?}", snap).len()
+        ));
 
         // inject_css + remove_css
-        let css_id = cp.inject_css("body { border: 3px solid red !important; }").await?;
+        let css_id = cp
+            .inject_css("body { border: 3px solid red !important; }")
+            .await?;
         ok!(format!("inject_css() → id={}", css_id));
         cp.sleep(Duration::from_millis(200)).await;
         cp.remove_css(&css_id).await?;
@@ -470,15 +509,30 @@ async fn main() -> Result<()> {
         let elements = cp.interactive_elements().await?;
         info!(format!("发现 {} 个可交互元素:", elements.len()));
         for el in elements.iter().take(10) {
-            info!(format!("  [{}] name='{}' type='{}' text='{}'",
-                el.tag, el.name, el.input_type, el.text.chars().take(20).collect::<String>()));
+            info!(format!(
+                "  [{}] name='{}' type='{}' text='{}'",
+                el.tag,
+                el.name,
+                el.input_type,
+                el.text.chars().take(20).collect::<String>()
+            ));
         }
-        ok!(format!("interactive_elements() 发现 {} 个可交互元素", elements.len()));
+        ok!(format!(
+            "interactive_elements() 发现 {} 个可交互元素",
+            elements.len()
+        ));
 
         // page_summary
         let summary = cp.page_summary().await?;
-        info!(format!("页面概要: {} 个链接, {} 个表单", summary.links.len(), summary.forms.len()));
-        info!(format!("标题: '{}', 描述: {:?}", summary.title, summary.description));
+        info!(format!(
+            "页面概要: {} 个链接, {} 个表单",
+            summary.links.len(),
+            summary.forms.len()
+        ));
+        info!(format!(
+            "标题: '{}', 描述: {:?}",
+            summary.title, summary.description
+        ));
         ok!("page_summary() 页面结构概要");
 
         // page_snapshot
@@ -487,7 +541,10 @@ async fn main() -> Result<()> {
         info!(format!("标题: {}", snapshot.title));
         info!(format!("视口: {}", snapshot.viewport_size));
         info!(format!("滚动: {}", snapshot.scroll_position));
-        info!(format!("可交互元素: {} 个", snapshot.interactive_elements.len()));
+        info!(format!(
+            "可交互元素: {} 个",
+            snapshot.interactive_elements.len()
+        ));
         let preview: String = snapshot.visible_text.chars().take(200).collect();
         info!(format!("可见文本前200字: {}...", preview));
         ok!("page_snapshot() 完整页面快照");
@@ -498,7 +555,10 @@ async fn main() -> Result<()> {
 
         // smart_fill
         let result = cp.smart_fill("username", "agent_user").await;
-        ok!(format!("smart_fill('username', 'agent_user') → success={}", result.success));
+        ok!(format!(
+            "smart_fill('username', 'agent_user') → success={}",
+            result.success
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -507,12 +567,16 @@ async fn main() -> Result<()> {
     section!(16, "高级特性");
     {
         // frame_html / frame_execute (iframe)
-        let _ = cp.execute(r#"
+        let _ = cp
+            .execute(
+                r#"
             var iframe = document.createElement('iframe');
             iframe.id = 'test-iframe';
             iframe.srcdoc = '<h2>IFrame 内容</h2><p>这是 iframe 中的文字</p>';
             document.body.appendChild(iframe);
-        "#).await;
+        "#,
+            )
+            .await;
         cp.sleep(Duration::from_millis(500)).await;
 
         match cp.frame_html("#test-iframe").await {
@@ -520,7 +584,10 @@ async fn main() -> Result<()> {
             Err(e) => info!(format!("frame_html 跳过: {}", e)),
         }
 
-        match cp.frame_execute("#test-iframe", "document.title = 'iframe-title'; 'ok'").await {
+        match cp
+            .frame_execute("#test-iframe", "document.title = 'iframe-title'; 'ok'")
+            .await
+        {
             Ok(_) => ok!("frame_execute() 在 iframe 中执行 JS"),
             Err(e) => info!(format!("frame_execute 跳过: {}", e)),
         }
@@ -563,7 +630,8 @@ async fn main() -> Result<()> {
         }
 
         // alert handling
-        cp.execute("setTimeout(() => confirm('测试确认框'), 100)").await?;
+        cp.execute("setTimeout(() => confirm('测试确认框'), 100)")
+            .await?;
         cp.sleep(Duration::from_millis(200)).await;
         match cp.handle_alert(true, None).await {
             Ok(_) => ok!("handle_alert(true) 处理弹窗"),

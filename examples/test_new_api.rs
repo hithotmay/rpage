@@ -6,7 +6,7 @@ async fn main() -> Result<()> {
     println!("=== 新增 API 验证 ===\n");
 
     let page = ChromiumPage::connect("http://127.0.0.1:9222").await?;
-    
+
     // 1. goto — 链式调用
     println!("[1] goto (链式)...");
     page.goto("https://example.com").await?;
@@ -40,7 +40,9 @@ async fn main() -> Result<()> {
         Ok(el) => {
             el.click().await?;
             page.keys("rust language").await?;
-            let val = page.execute("document.querySelector('textarea[name=q]').value").await?;
+            let val = page
+                .execute("document.querySelector('textarea[name=q]').value")
+                .await?;
             println!("  keys 输入: {val}");
         }
         Err(e) => println!("  跳过 (Google 可能重定向): {e}"),
@@ -54,7 +56,9 @@ async fn main() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     match page.type_text("input[name=custname]", "test user").await {
         Ok(_) => {
-            let val = page.execute("document.querySelector('input[name=custname]').value").await?;
+            let val = page
+                .execute("document.querySelector('input[name=custname]').value")
+                .await?;
             println!("  type_text: {val}");
         }
         Err(e) => println!("  跳过: {e}"),

@@ -1,10 +1,10 @@
 //! rpage 能力展示：常见复杂浏览器自动化操作
 //! 覆盖 10 大场景，全部使用同步 API
 
-use rpage::sync::SyncPage;
 use rpage::chromium_page::CookieInfo;
-use std::time::Duration;
+use rpage::sync::SyncPage;
 use std::collections::HashMap;
+use std::time::Duration;
 
 macro_rules! section {
     ($n:expr, $title:expr) => {
@@ -42,7 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 元素查找与交互
         let input = p.ele("tag:input")?;
-        ok!("定位第一个 input: tag={}, visible={}", input.tag(), input.is_visible());
+        ok!(
+            "定位第一个 input: tag={}, visible={}",
+            input.tag(),
+            input.is_visible()
+        );
 
         // 填写表单 — 链式调用
         p.type_text("input[name='custname']", "张三")?;
@@ -86,10 +90,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 异步 JS — fetch 数据
         let data = p.run_async_js(
-            "const r = await fetch('https://httpbin.org/json'); return await r.json();"
+            "const r = await fetch('https://httpbin.org/json'); return await r.json();",
         )?;
-        ok!("run_async_js: 获取到 JSON, slideshow.title = {}",
-            data.get("slideshow").and_then(|s| s.get("title")).and_then(|t| t.as_str()).unwrap_or("?"));
+        ok!(
+            "run_async_js: 获取到 JSON, slideshow.title = {}",
+            data.get("slideshow")
+                .and_then(|s| s.get("title"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("?")
+        );
 
         // run_js_with_args
         let sum = p.run_js_with_args(
@@ -123,7 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // DOM 树遍历
         let first_child = root.first_child()?;
-        ok!("first_child: tag={}, text={}", first_child.tag(), first_child.text());
+        ok!(
+            "first_child: tag={}, text={}",
+            first_child.tag(),
+            first_child.text()
+        );
 
         let next = first_child.next()?;
         ok!("next sibling: tag={}", next.tag());
@@ -222,7 +235,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 验证 cookie
         p.get("https://httpbin.org/cookies")?;
         let cookie_json = p.execute("document.body.innerText")?;
-        ok!("验证 cookies: {}", cookie_json.as_str().unwrap_or("").chars().take(120).collect::<String>());
+        ok!(
+            "验证 cookies: {}",
+            cookie_json
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect::<String>()
+        );
 
         // 删除 cookie
         p.delete_cookie("rpage_test")?;
@@ -238,7 +259,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p.set_user_agent("rpage-bot/1.0 (Browser Automation)")?;
         p.get("https://httpbin.org/user-agent")?;
         let ua = p.execute("document.body.innerText")?;
-        ok!("set_user_agent: {}", ua.as_str().unwrap_or("").chars().take(80).collect::<String>());
+        ok!(
+            "set_user_agent: {}",
+            ua.as_str()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>()
+        );
 
         // 自定义 Headers
         let mut headers = HashMap::new();
@@ -248,7 +276,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p.get("https://httpbin.org/headers")?;
         let resp = p.execute("document.body.innerText")?;
         let resp_str = resp.as_str().unwrap_or("");
-        ok!("set_extra_headers: 响应包含 X-Custom-Header = {}", resp_str.contains("rpage-was-here"));
+        ok!(
+            "set_extra_headers: 响应包含 X-Custom-Header = {}",
+            resp_str.contains("rpage-was-here")
+        );
 
         // 屏蔽 URL
         p.set_blocked_urls(&["https://httpbin.org/image/png"])?;
@@ -315,7 +346,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p.set_viewport(375, 812)?;
         ok!("set_viewport(375x812): iPhone X 尺寸");
         let bounds = p.get_window_bounds()?;
-        info!("窗口: left={} top={} w={} h={}", bounds.0, bounds.1, bounds.2, bounds.3);
+        info!(
+            "窗口: left={} top={} w={} h={}",
+            bounds.0, bounds.1, bounds.2, bounds.3
+        );
 
         // 设备缩放
         p.set_device_scale(2.0)?;
@@ -352,16 +386,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elements = p.interactive_elements()?;
         ok!("interactive_elements: {} 个可交互元素", elements.len());
         for (i, el) in elements.iter().take(8).enumerate() {
-            info!("[{}] {:?} {} type={:?}", i, el.tag, el.text.chars().take(30).collect::<String>(), el.input_type);
+            info!(
+                "[{}] {:?} {} type={:?}",
+                i,
+                el.tag,
+                el.text.chars().take(30).collect::<String>(),
+                el.input_type
+            );
         }
 
         // 页面摘要
         let summary = p.page_summary()?;
-        ok!("page_summary: title={:?}, url={:?}", summary.title, summary.url.chars().take(60).collect::<String>());
+        ok!(
+            "page_summary: title={:?}, url={:?}",
+            summary.title,
+            summary.url.chars().take(60).collect::<String>()
+        );
 
         // 页面快照
         let snap = p.page_snapshot()?;
-        ok!("page_snapshot: {} 个交互元素, viewport={}", snap.interactive_elements.len(), snap.viewport_size);
+        ok!(
+            "page_snapshot: {} 个交互元素, viewport={}",
+            snap.interactive_elements.len(),
+            snap.viewport_size
+        );
 
         // DOM 快照
         let dom = p.dom_snapshot()?;
@@ -373,7 +421,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 智能填写
         let result = p.smart_fill("custname", "Agent Bot");
-        ok!("smart_fill('custname', 'Agent Bot'): success={}", result.success);
+        ok!(
+            "smart_fill('custname', 'Agent Bot'): success={}",
+            result.success
+        );
 
         // 链接提取
         let links = p.links()?;

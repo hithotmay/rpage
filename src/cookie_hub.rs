@@ -245,7 +245,8 @@ mod tests {
     #[test]
     fn test_cookie_hub_cookie_header_after_set() {
         let hub = CookieHub::new();
-        hub.set_cookie_raw("token=xyz", "https://example.com").unwrap();
+        hub.set_cookie_raw("token=xyz", "https://example.com")
+            .unwrap();
         let header = hub.cookie_header("https://example.com").unwrap();
         assert_eq!(header, "token=xyz");
     }
@@ -253,7 +254,8 @@ mod tests {
     #[test]
     fn test_cookie_hub_clear_removes_cookies() {
         let hub = CookieHub::new();
-        hub.set_cookie_raw("foo=bar", "https://example.com").unwrap();
+        hub.set_cookie_raw("foo=bar", "https://example.com")
+            .unwrap();
         assert!(!hub.get_cookies("https://example.com").unwrap().is_empty());
 
         hub.clear().unwrap();

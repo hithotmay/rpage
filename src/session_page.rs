@@ -167,14 +167,9 @@ impl SessionPage {
             .as_deref()
             .ok_or_else(|| Error::CookieSync("no page loaded".into()))?;
         let url = url::Url::parse(url_str)?;
-        let cookie_str = format!(
-            "{}={}; Path=/",
-            name,
-            value,
-        );
-        let cookie =
-            cookie_store::Cookie::parse(cookie_str, &url)
-                .map_err(|e| Error::CookieSync(format!("parse cookie: {e}")))?;
+        let cookie_str = format!("{}={}; Path=/", name, value,);
+        let cookie = cookie_store::Cookie::parse(cookie_str, &url)
+            .map_err(|e| Error::CookieSync(format!("parse cookie: {e}")))?;
         self.cookie_hub.set_cookie(cookie, &url)
     }
 
@@ -254,11 +249,7 @@ impl SessionPage {
     }
 
     /// PUT JSON.
-    pub async fn put_json(
-        &mut self,
-        url: &str,
-        json: &serde_json::Value,
-    ) -> Result<String> {
+    pub async fn put_json(&mut self, url: &str, json: &serde_json::Value) -> Result<String> {
         debug!("PUT (json) {url}");
         let resp = self.client.put(url).json(json).send().await?;
         self.last_status = Some(resp.status());
@@ -297,11 +288,7 @@ impl SessionPage {
     }
 
     /// PATCH JSON.
-    pub async fn patch_json(
-        &mut self,
-        url: &str,
-        json: &serde_json::Value,
-    ) -> Result<String> {
+    pub async fn patch_json(&mut self, url: &str, json: &serde_json::Value) -> Result<String> {
         debug!("PATCH (json) {url}");
         let resp = self.client.patch(url).json(json).send().await?;
         self.last_status = Some(resp.status());

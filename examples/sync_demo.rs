@@ -67,9 +67,11 @@ fn main() -> rpage::Result<()> {
 
     // Page snapshot (Agent API)
     let snapshot = page.page_snapshot()?;
-    println!("  Page snapshot: {} interactive, {} chars visible text",
+    println!(
+        "  Page snapshot: {} interactive, {} chars visible text",
         snapshot.interactive_elements.len(),
-        snapshot.visible_text.len().min(100));
+        snapshot.visible_text.len().min(100)
+    );
 
     println!("\n=== All Done ===");
     Ok(())

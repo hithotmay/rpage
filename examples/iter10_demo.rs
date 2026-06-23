@@ -22,19 +22,29 @@ async fn main() -> Result<()> {
     // ── 3. links / images: 页面资源提取 ──
     println!("[3] links / images — 提取页面资源...");
     let links = page.links().await?;
-    println!("  链接({}): {:?}", links.len(), &links[..links.len().min(3)]);
+    println!(
+        "  链接({}): {:?}",
+        links.len(),
+        &links[..links.len().min(3)]
+    );
     let images = page.images().await?;
-    println!("  图片({}): {:?}", images.len(), &images[..images.len().min(3)]);
+    println!(
+        "  图片({}): {:?}",
+        images.len(),
+        &images[..images.len().min(3)]
+    );
 
     // ── 4. get_and_wait: 导航并等待完成 ──
     println!("\n[4] get_and_wait — 导航并等待...");
-    page.get_and_wait("https://httpbin.org/forms/post", 10).await?;
+    page.get_and_wait("https://httpbin.org/forms/post", 10)
+        .await?;
     let title = page.title().await?;
     println!("  页面标题: {title}");
 
     // ── 5. smooth_scroll: 平滑滚动 ──
     println!("\n[5] smooth_scroll — 平滑滚动...");
-    page.execute("document.body.innerHTML = '<div style=\"height:3000px\">Scroll Test</div>'").await?;
+    page.execute("document.body.innerHTML = '<div style=\"height:3000px\">Scroll Test</div>'")
+        .await?;
     page.smooth_scroll(0, 1500, 500).await?;
     println!("  ✅ 平滑滚动到 1500px");
 
@@ -63,7 +73,14 @@ async fn main() -> Result<()> {
     page.set_offline(true).await?;
     println!("  ✅ 离线模式开启");
     let result = page.get("https://httpbin.org/get").await;
-    println!("  离线导航结果: {}", if result.is_err() { "失败(预期)" } else { "成功(意外)" });
+    println!(
+        "  离线导航结果: {}",
+        if result.is_err() {
+            "失败(预期)"
+        } else {
+            "成功(意外)"
+        }
+    );
     page.set_offline(false).await?;
     println!("  ✅ 离线模式已关闭");
 
@@ -117,7 +134,9 @@ async fn main() -> Result<()> {
     println!("  暂停的请求数: {}", paused.len());
     for req in &paused {
         println!("    {} {} ({})", req.method, req.url, req.resource_type);
-        guard.continue_request(req.request_id.as_ref(), None).await?;
+        guard
+            .continue_request(req.request_id.as_ref(), None)
+            .await?;
     }
     drop(guard);
     println!("  ✅ 拦截已关闭");

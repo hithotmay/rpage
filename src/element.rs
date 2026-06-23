@@ -393,15 +393,25 @@ impl Element {
              }})()",
             xp = escaped
         );
-        let page = self.page.as_ref()
+        let page = self
+            .page
+            .as_ref()
             .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
-        let val = page.evaluate(js.as_str()).await
+        let val = page
+            .evaluate(js.as_str())
+            .await
             .map_err(|e| Error::Browser(format!("xpath locate: {e}")))?;
-        let coords = val.value().and_then(|v| v.as_array())
+        let coords = val
+            .value()
+            .and_then(|v| v.as_array())
             .ok_or_else(|| Error::ElementNotFound(format!("xpath not found: {}", xpath)))?;
-        let x = coords.first().and_then(|v| v.as_f64())
+        let x = coords
+            .first()
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| Error::Browser("xpath locate: missing x coordinate".into()))?;
-        let y = coords.get(1).and_then(|v| v.as_f64())
+        let y = coords
+            .get(1)
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| Error::Browser("xpath locate: missing y coordinate".into()))?;
         Ok((x, y))
     }
@@ -437,7 +447,9 @@ impl Element {
         use chromiumoxide::cdp::browser_protocol::input::{
             DispatchMouseEventParams, DispatchMouseEventType,
         };
-        let page = self.page.as_ref()
+        let page = self
+            .page
+            .as_ref()
             .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
         let press = DispatchMouseEventParams::builder()
             .r#type(DispatchMouseEventType::MousePressed)
@@ -447,7 +459,8 @@ impl Element {
             .click_count(click_count)
             .build()
             .map_err(|e| Error::Browser(format!("build: {e}")))?;
-        page.execute(press).await
+        page.execute(press)
+            .await
             .map_err(|e| Error::Browser(format!("dispatch: {e}")))?;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let release = DispatchMouseEventParams::builder()
@@ -458,7 +471,8 @@ impl Element {
             .click_count(click_count)
             .build()
             .map_err(|e| Error::Browser(format!("build: {e}")))?;
-        page.execute(release).await
+        page.execute(release)
+            .await
             .map_err(|e| Error::Browser(format!("dispatch: {e}")))?;
         Ok(())
     }
@@ -484,9 +498,12 @@ impl Element {
         // as genuine, matching the native-CSS-path's behavior below.
         if let Some(ref xpath) = self.fallback_xpath {
             let (x, y) = self.xpath_center_point(xpath).await?;
-            let page = self.page.as_ref()
+            let page = self
+                .page
+                .as_ref()
                 .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
-            page.click(chromiumoxide::layout::Point::new(x, y)).await
+            page.click(chromiumoxide::layout::Point::new(x, y))
+                .await
                 .map_err(|e| Error::Browser(format!("xpath click: dispatch: {e}")))?;
             return Ok(());
         }
@@ -514,8 +531,12 @@ impl Element {
         // physical keyboard keys and has no mapping for non-ASCII text
         // (Chinese, etc.), failing with "Key not found: <char>". insertText
         // has no such limitation, which is what this method's doc promises.
-        self.click().await.map_err(|e| Error::Browser(format!("focus: {e}")))?;
-        let page = self.page.as_ref()
+        self.click()
+            .await
+            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
+        let page = self
+            .page
+            .as_ref()
             .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
         use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
         page.execute(InsertTextParams::new(text))
@@ -596,7 +617,9 @@ impl Element {
     pub async fn hover(&self) -> Result<()> {
         if let Some(ref xpath) = self.fallback_xpath {
             let (x, y) = self.xpath_center_point(xpath).await?;
-            let page = self.page.as_ref()
+            let page = self
+                .page
+                .as_ref()
                 .ok_or_else(|| Error::Browser("requires Chromium mode".into()))?;
             use chromiumoxide::cdp::browser_protocol::input::{
                 DispatchMouseEventParams, DispatchMouseEventType,
@@ -607,7 +630,8 @@ impl Element {
                 .y(y)
                 .build()
                 .map_err(|e| Error::Browser(format!("build: {e}")))?;
-            page.execute(mv).await
+            page.execute(mv)
+                .await
                 .map_err(|e| Error::Browser(format!("xpath hover: {e}")))?;
             return Ok(());
         }
@@ -643,7 +667,9 @@ impl Element {
 
         // Focus the element first — `click()` already handles XPath-backed
         // elements (real CDP mouse click) vs CSS-backed ones consistently.
-        self.click().await.map_err(|e| Error::Browser(format!("focus: {e}")))?;
+        self.click()
+            .await
+            .map_err(|e| Error::Browser(format!("focus: {e}")))?;
 
         if self.fallback_xpath.is_some() {
             // No element handle for XPath-backed elements (see
@@ -657,14 +683,16 @@ impl Element {
                 .key(key)
                 .build()
                 .map_err(|e| Error::Browser(format!("key build: {e}")))?;
-            page.execute(down).await
+            page.execute(down)
+                .await
                 .map_err(|e| Error::Browser(format!("press_key: {e}")))?;
             let up = DispatchKeyEventParams::builder()
                 .r#type(DispatchKeyEventType::KeyUp)
                 .key(key)
                 .build()
                 .map_err(|e| Error::Browser(format!("key build: {e}")))?;
-            page.execute(up).await
+            page.execute(up)
+                .await
                 .map_err(|e| Error::Browser(format!("press_key: {e}")))?;
             return Ok(());
         }
@@ -884,7 +912,10 @@ impl Element {
                 .bounding_box()
                 .await
                 .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
-            (src_bbox.x + src_bbox.width / 2.0, src_bbox.y + src_bbox.height / 2.0)
+            (
+                src_bbox.x + src_bbox.width / 2.0,
+                src_bbox.y + src_bbox.height / 2.0,
+            )
         };
         let (tgt_x, tgt_y) = if let Some(ref xpath) = target.fallback_xpath {
             target.xpath_center_point(xpath).await?
@@ -894,7 +925,10 @@ impl Element {
                 .bounding_box()
                 .await
                 .map_err(|e| Error::Browser(format!("tgt bbox: {e}")))?;
-            (tgt_bbox.x + tgt_bbox.width / 2.0, tgt_bbox.y + tgt_bbox.height / 2.0)
+            (
+                tgt_bbox.x + tgt_bbox.width / 2.0,
+                tgt_bbox.y + tgt_bbox.height / 2.0,
+            )
         };
 
         let page = self
@@ -966,7 +1000,10 @@ impl Element {
                 .bounding_box()
                 .await
                 .map_err(|e| Error::Browser(format!("src bbox: {e}")))?;
-            (src_bbox.x + src_bbox.width / 2.0, src_bbox.y + src_bbox.height / 2.0)
+            (
+                src_bbox.x + src_bbox.width / 2.0,
+                src_bbox.y + src_bbox.height / 2.0,
+            )
         };
         let tgt_x = src_x + offset_x;
         let tgt_y = src_y + offset_y;
@@ -1080,9 +1117,13 @@ impl Element {
             Ok(bbox) => Ok((bbox.x, bbox.y, bbox.width, bbox.height)),
             Err(_) => {
                 // Fallback: use getBoundingClientRect via CDP CallFunctionOn
-                let page = self.page.as_ref()
+                let page = self
+                    .page
+                    .as_ref()
                     .ok_or_else(|| Error::Browser("bounding_box: no page ref".into()))?;
-                let oid = self.object_id.clone()
+                let oid = self
+                    .object_id
+                    .clone()
                     .ok_or_else(|| Error::Browser("bounding_box: no object_id".into()))?;
                 use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
                 let params = CallFunctionOnParams::builder()
@@ -1093,13 +1134,21 @@ impl Element {
                     .return_by_value(true)
                     .build()
                     .map_err(|e| Error::Browser(format!("bounding_box: {e}")))?;
-                let result = page.execute(params).await
+                let result = page
+                    .execute(params)
+                    .await
                     .map_err(|e| Error::Browser(format!("bounding_box js: {e}")))?;
-                let arr = result.result.result.value
+                let arr = result
+                    .result
+                    .result
+                    .value
                     .ok_or_else(|| Error::Browser("bounding_box: no value".into()))?;
-                let vals: Vec<f64> = arr.as_array()
+                let vals: Vec<f64> = arr
+                    .as_array()
                     .ok_or_else(|| Error::Browser("bounding_box: not array".into()))?
-                    .iter().filter_map(|v| v.as_f64()).collect();
+                    .iter()
+                    .filter_map(|v| v.as_f64())
+                    .collect();
                 if vals.len() >= 4 {
                     Ok((vals[0], vals[1], vals[2], vals[3]))
                 } else {
@@ -1217,10 +1266,7 @@ impl Element {
 
                 // Step 1: Call the JS expression and return the element RemoteObject
                 //         to obtain its object_id (NOT return_by_value).
-                let fn_decl_obj = format!(
-                    "function() {{ var el = {}; return el; }}",
-                    js_expr
-                );
+                let fn_decl_obj = format!("function() {{ var el = {}; return el; }}", js_expr);
                 let params_obj = CallFunctionOnParams::builder()
                     .object_id(oid.clone())
                     .function_declaration(fn_decl_obj)
@@ -1471,10 +1517,7 @@ impl Element {
                 "if (!this.shadowRoot) return null; \
                  var cur = this.shadowRoot;",
             );
-            let inner_sels: Vec<String> = parts
-                .iter()
-                .map(json_escape)
-                .collect();
+            let inner_sels: Vec<String> = parts.iter().map(json_escape).collect();
             for (i, sel) in inner_sels.iter().enumerate() {
                 if i < inner_sels.len() - 1 {
                     body.push_str(&format!(
@@ -1588,10 +1631,7 @@ impl Element {
         }
 
         // Build JS for querySelectorAll
-        let inner_sels: Vec<String> = parts
-            .iter()
-            .map(json_escape)
-            .collect();
+        let inner_sels: Vec<String> = parts.iter().map(json_escape).collect();
 
         let query_body = if inner_sels.len() == 1 {
             format!(
@@ -1769,7 +1809,8 @@ impl Element {
     /// element.wait_for_visible_with_timeout(Duration::from_secs(30)).await?;
     /// ```
     pub async fn wait_for_visible(&self) -> Result<()> {
-        self.wait_for_visible_with_options(WaitOptions::default()).await
+        self.wait_for_visible_with_options(WaitOptions::default())
+            .await
     }
 
     /// Wait until this element is visible, with a custom timeout.
@@ -1808,7 +1849,8 @@ impl Element {
     ///
     /// Returns [`Error::Timeout`] if the element is still visible within the timeout.
     pub async fn wait_for_hidden(&self) -> Result<()> {
-        self.wait_for_hidden_with_options(WaitOptions::default()).await
+        self.wait_for_hidden_with_options(WaitOptions::default())
+            .await
     }
 
     /// Wait until this element is hidden, with a custom timeout.
@@ -1848,7 +1890,8 @@ impl Element {
     ///
     /// Returns [`Error::Timeout`] if the element remains disabled within the timeout.
     pub async fn wait_for_enabled(&self) -> Result<()> {
-        self.wait_for_enabled_with_options(WaitOptions::default()).await
+        self.wait_for_enabled_with_options(WaitOptions::default())
+            .await
     }
 
     /// Wait until this element is enabled, with a custom timeout.
@@ -1898,11 +1941,7 @@ impl Element {
     }
 
     /// Wait until this element's text contains the given substring, with full [`WaitOptions`].
-    pub async fn wait_for_text_with_options(
-        &self,
-        text: &str,
-        opts: WaitOptions,
-    ) -> Result<()> {
+    pub async fn wait_for_text_with_options(&self, text: &str, opts: WaitOptions) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
             match self.requery().await {
@@ -1983,7 +2022,8 @@ impl Element {
     ///
     /// Returns [`Error::Timeout`] if the element is still present within the timeout.
     pub async fn wait_for_stale(&self) -> Result<()> {
-        self.wait_for_stale_with_options(WaitOptions::default()).await
+        self.wait_for_stale_with_options(WaitOptions::default())
+            .await
     }
 
     /// Wait until this element is stale, with a custom timeout.
@@ -2072,11 +2112,7 @@ impl Element {
     }
 
     /// Wait until this element's text exactly matches, with full [`WaitOptions`].
-    pub async fn wait_for_text_eq_with_options(
-        &self,
-        text: &str,
-        opts: WaitOptions,
-    ) -> Result<()> {
+    pub async fn wait_for_text_eq_with_options(&self, text: &str, opts: WaitOptions) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
             match self.requery().await {
@@ -2628,13 +2664,7 @@ mod tests {
 
     #[test]
     fn test_is_displayed_empty_html() {
-        let el = Element::new_session(
-            None,
-            String::new(),
-            String::new(),
-            String::new(),
-            vec![],
-        );
+        let el = Element::new_session(None, String::new(), String::new(), String::new(), vec![]);
         assert!(!el.is_displayed());
     }
 

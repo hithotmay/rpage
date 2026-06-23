@@ -345,7 +345,10 @@ struct RawCdpCommand {
 }
 
 impl serde::Serialize for RawCdpCommand {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         self.params.serialize(serializer)
     }
 }
@@ -415,7 +418,10 @@ pub struct DataPacket {
 impl DataPacket {
     /// Convenience: the response body as text (empty string if not captured).
     pub fn body_text(&self) -> String {
-        self.response_body.as_ref().map(|b| b.text()).unwrap_or_default()
+        self.response_body
+            .as_ref()
+            .map(|b| b.text())
+            .unwrap_or_default()
     }
 }
 
@@ -468,7 +474,7 @@ impl ChromiumPage {
             Some(&ud),
             port,
             &[],
-            false,       // headless = false, show browser window (see doc above)
+            false, // headless = false, show browser window (see doc above)
             None,
             true,
             false,
@@ -651,7 +657,8 @@ impl ChromiumPage {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
 
-            let mut child = cmd.spawn()
+            let mut child = cmd
+                .spawn()
                 .map_err(|e| Error::Browser(format!("spawn Chrome: {e}")))?;
 
             // Check that the child process didn't immediately exit (happens when
@@ -802,7 +809,10 @@ impl ChromiumPage {
                 .map_err(|e| Error::Browser(format!("new page: {e}")))?
         } else if page_targets.len() == 1 {
             let tid = &page_targets[0].id;
-            info!("Reusing single existing page (id={tid}, url={})", page_targets[0].url);
+            info!(
+                "Reusing single existing page (id={tid}, url={})",
+                page_targets[0].url
+            );
             // Retry get_page a few times — the handler may not have registered
             // the target yet.
             let mut page = None;
@@ -814,7 +824,9 @@ impl ChromiumPage {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             page.ok_or_else(|| {
-                Error::Browser(format!("target {tid} known via /json/list but not in handler"))
+                Error::Browser(format!(
+                    "target {tid} known via /json/list but not in handler"
+                ))
             })?
         } else {
             // Multiple page targets: find the one that's currently visible.
@@ -824,10 +836,7 @@ impl ChromiumPage {
                     if let Ok(res) = p.evaluate("document.visibilityState").await {
                         if let Some(val) = res.value().and_then(|v| v.as_str()) {
                             if val == "visible" {
-                                info!(
-                                    "Reusing active (visible) page (id={}, url={})",
-                                    t.id, t.url
-                                );
+                                info!("Reusing active (visible) page (id={}, url={})", t.id, t.url);
                                 found = Some(p);
                                 break;
                             }
@@ -850,7 +859,9 @@ impl ChromiumPage {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 page.ok_or_else(|| {
-                    Error::Browser(format!("target {tid} known via /json/list but not in handler"))
+                    Error::Browser(format!(
+                        "target {tid} known via /json/list but not in handler"
+                    ))
                 })?
             }
         };
@@ -954,7 +965,13 @@ impl ChromiumPage {
         // Network.loadingFailed — feeds `failures()`. The event itself carries
         // no URL, so resolve it from the matching request we already recorded.
         let nm3 = nm.clone();
-        if let Ok(Ok(mut rx)) = tokio::time::timeout(init_timeout, pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventLoadingFailed>()).await {
+        if let Ok(Ok(mut rx)) = tokio::time::timeout(
+            init_timeout,
+            pc.event_listener::<chromiumoxide::cdp::browser_protocol::network::EventLoadingFailed>(
+            ),
+        )
+        .await
+        {
             tokio::spawn(async move {
                 while let Some(ev) = rx.next().await {
                     let rid: String = ev.request_id.clone().into();
@@ -1146,9 +1163,11 @@ impl ChromiumPage {
             }
             "eager" => {
                 // Wait for DOMContentLoaded via JS polling
-                let js = "document.readyState === 'interactive' || document.readyState === 'complete'";
+                let js =
+                    "document.readyState === 'interactive' || document.readyState === 'complete'";
                 let timeout_secs = 15u64;
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
                 loop {
                     let ready = self
                         .page()
@@ -1351,7 +1370,8 @@ impl ChromiumPage {
         let xpath = locator.to_xpath().ok_or_else(|| {
             Error::InvalidLocator(format!("cannot convert to xpath: {locator_str}"))
         })?;
-        self.ele_by_xpath_fallback(&xpath, self.opts.timeout.as_secs()).await
+        self.ele_by_xpath_fallback(&xpath, self.opts.timeout.as_secs())
+            .await
     }
 
     /// Static-snapshot element lookup (DrissionPage `s_ele`): grab the page's
@@ -1556,17 +1576,25 @@ impl ChromiumPage {
                             let attrs: Vec<(String, String)> = data["attrs"]
                                 .as_array()
                                 .map(|arr| {
-                                    arr.iter().filter_map(|item| {
-                                        let a = item.as_array()?;
-                                        Some((a.first()?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string()))
-                                    }).collect()
+                                    arr.iter()
+                                        .filter_map(|item| {
+                                            let a = item.as_array()?;
+                                            Some((
+                                                a.first()?.as_str()?.to_string(),
+                                                a.get(1)?.as_str()?.to_string(),
+                                            ))
+                                        })
+                                        .collect()
                                 })
                                 .unwrap_or_default();
                             return Ok(Element::new_cdp(
                                 self.page().clone(),
                                 String::new(),
                                 Some(crate::locator::Locator::XPath(xpath.to_string())),
-                                html, tag, text, attrs,
+                                html,
+                                tag,
+                                text,
+                                attrs,
                                 Some(xpath.to_string()), // fallback_xpath for JS-based interactions
                             ));
                         }
@@ -1610,7 +1638,10 @@ impl ChromiumPage {
             xp = escaped
         );
 
-        let val = self.page().evaluate(js.as_str()).await
+        let val = self
+            .page()
+            .evaluate(js.as_str())
+            .await
             .map_err(|e| Error::Browser(format!("xpath eval: {e}")))?;
         let json_str = val.value().and_then(|v| v.as_str()).unwrap_or("[]");
         let arr: Vec<serde_json::Value> = serde_json::from_str(json_str)
@@ -1623,16 +1654,26 @@ impl ChromiumPage {
             let text = data["text"].as_str().unwrap_or_default().to_string();
             let attrs: Vec<(String, String)> = data["attrs"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|item| {
-                    let arr = item.as_array()?;
-                    Some((arr.first()?.as_str()?.to_string(), arr.get(1)?.as_str()?.to_string()))
-                }).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|item| {
+                            let arr = item.as_array()?;
+                            Some((
+                                arr.first()?.as_str()?.to_string(),
+                                arr.get(1)?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             results.push(Element::new_cdp(
                 self.page().clone(),
                 String::new(),
                 Some(crate::locator::Locator::XPath(xpath.to_string())),
-                html, tag, text, attrs,
+                html,
+                tag,
+                text,
+                attrs,
                 None,
             ));
         }
@@ -1651,7 +1692,12 @@ impl ChromiumPage {
             match step {
                 crate::locator::Locator::Css(sel) => {
                     // Convert simple CSS to XPath
-                    let xp = if sel.contains(' ') || sel.contains('>') || sel.contains('.') || sel.contains('#') || sel.contains('[') {
+                    let xp = if sel.contains(' ')
+                        || sel.contains('>')
+                        || sel.contains('.')
+                        || sel.contains('#')
+                        || sel.contains('[')
+                    {
                         // Complex CSS: use it as-is via a JS workaround
                         format!("descendant::*[self::div]/**") // placeholder, will handle below
                     } else {
@@ -1693,7 +1739,12 @@ impl ChromiumPage {
                         }
                     }
                     if found {
-                        return self.build_element_from_cdp(cdp_el, crate::locator::Locator::Chain(steps.to_vec())).await;
+                        return self
+                            .build_element_from_cdp(
+                                cdp_el,
+                                crate::locator::Locator::Chain(steps.to_vec()),
+                            )
+                            .await;
                     }
                 }
             }
@@ -1703,7 +1754,12 @@ impl ChromiumPage {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         Err(Error::ElementNotFound(format!(
-            "chain not found: {}", steps.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(" -> ")
+            "chain not found: {}",
+            steps
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(" -> ")
         )))
     }
 
@@ -1736,10 +1792,7 @@ impl ChromiumPage {
         }
 
         let host_sel = json_escape(parts[0]);
-        let inner_sels: Vec<String> = parts[1..]
-            .iter()
-            .map(json_escape)
-            .collect();
+        let inner_sels: Vec<String> = parts[1..].iter().map(json_escape).collect();
 
         // Build recursive JS for shadow DOM piercing
         let query_js = build_shadow_query_js(&host_sel, &inner_sels);
@@ -1780,10 +1833,7 @@ impl ChromiumPage {
         }
 
         let host_sel = json_escape(parts[0]);
-        let inner_sels: Vec<String> = parts[1..]
-            .iter()
-            .map(json_escape)
-            .collect();
+        let inner_sels: Vec<String> = parts[1..].iter().map(json_escape).collect();
 
         let query_js = build_shadow_query_all_js(&host_sel, &inner_sels);
 
@@ -2113,7 +2163,11 @@ impl ChromiumPage {
             .execute(params)
             .await
             .map_err(|e| Error::Browser(format!("run_async_js: {e}")))?;
-        Ok(r.result.result.value.clone().unwrap_or(serde_json::Value::Null))
+        Ok(r.result
+            .result
+            .value
+            .clone()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// Execute a JavaScript function with arguments passed as a JSON value.
@@ -2134,8 +2188,7 @@ impl ChromiumPage {
         expression: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let args_json = serde_json::to_string(&args)
-            .unwrap_or_else(|_| "undefined".to_string());
+        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "undefined".to_string());
         let escaped_args = args_json.replace('\\', "\\\\").replace('\'', "\\'");
         let js = format!(
             "(function(){{ var args = JSON.parse('{}'); return ({expr})(args); }})()",
@@ -2171,9 +2224,9 @@ impl ChromiumPage {
                 }
             }
             if start.elapsed() > duration {
-                return Err(Error::Timeout(
-                    format!("wait_for_download timed out waiting for pattern: {url_pattern}"),
-                ));
+                return Err(Error::Timeout(format!(
+                    "wait_for_download timed out waiting for pattern: {url_pattern}"
+                )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
@@ -2189,9 +2242,7 @@ impl ChromiumPage {
     /// assert_eq!(ct, "text/html");
     /// ```
     pub async fn get_content_type(&self) -> Result<String> {
-        let val = self
-            .execute("document.contentType || 'text/html'")
-            .await?;
+        let val = self.execute("document.contentType || 'text/html'").await?;
         val.as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| Error::Browser("get_content_type failed".into()))
@@ -2366,7 +2417,10 @@ impl ChromiumPage {
             .unwrap_or_else(|e| e.into_inner())
             .remove(name)
             .ok_or_else(|| Error::Browser(format!("init script not found: {name}")))?;
-        self.init_scripts.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
+        self.init_scripts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
 
         let params = RemoveScriptToEvaluateOnNewDocumentParams::new(id);
         self.page()
@@ -2378,7 +2432,12 @@ impl ChromiumPage {
 
     /// List all registered init script names.
     pub fn list_init_scripts(&self) -> Vec<String> {
-        self.init_scripts.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
+        self.init_scripts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     // ── Screenshot ───────────────────────────────────────────
@@ -2536,7 +2595,8 @@ impl ChromiumPage {
         // CSS locator: use CDP querySelector (fast)
         if locator.is_css() {
             let selector = locator_to_selector(&locator)?;
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
             loop {
                 match self.page().find_element(&selector).await {
                     Ok(cdp_el) => {
@@ -3307,7 +3367,9 @@ impl ChromiumPage {
             .locator()
             .ok_or_else(|| Error::Browser("element has no locator".into()))?;
         let selector = locator_to_selector(locator)?;
-        let cdp_el = self.wait_for_element(&selector, self.opts.timeout.as_secs()).await?;
+        let cdp_el = self
+            .wait_for_element(&selector, self.opts.timeout.as_secs())
+            .await?;
         self.build_element_from_cdp(cdp_el, locator.clone()).await
     }
 
@@ -4203,7 +4265,11 @@ impl ChromiumPage {
     ///
     /// Uses `get()` to trigger the download, then polls `wait_download()`.
     /// Returns the `DownloadInfo` of the completed download.
-    pub async fn download(&self, url: &str, timeout_secs: u64) -> Result<crate::download::DownloadInfo> {
+    pub async fn download(
+        &self,
+        url: &str,
+        timeout_secs: u64,
+    ) -> Result<crate::download::DownloadInfo> {
         self.get(url).await?;
         self.wait_download(timeout_secs).await
     }
@@ -4475,16 +4541,23 @@ impl ChromiumPage {
         titles
             .iter()
             .position(|t| t.contains(title_contains))
-            .ok_or_else(|| Error::Browser(format!("get_tab_by_title: no tab with title containing '{title_contains}'")))
+            .ok_or_else(|| {
+                Error::Browser(format!(
+                    "get_tab_by_title: no tab with title containing '{title_contains}'"
+                ))
+            })
     }
 
     /// Find tab index by partial URL match.
     pub async fn get_tab_by_url(&self, url_contains: &str) -> Result<usize> {
         let urls = self.tab_urls().await?;
-        urls
-            .iter()
+        urls.iter()
             .position(|u| u.contains(url_contains))
-            .ok_or_else(|| Error::Browser(format!("get_tab_by_url: no tab with url containing '{url_contains}'")))
+            .ok_or_else(|| {
+                Error::Browser(format!(
+                    "get_tab_by_url: no tab with url containing '{url_contains}'"
+                ))
+            })
     }
 
     /// Wait for a new tab to appear within the given timeout.
@@ -4498,7 +4571,9 @@ impl ChromiumPage {
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        Err(Error::Browser(format!("wait_new_tab: timed out after {timeout_secs}s")))
+        Err(Error::Browser(format!(
+            "wait_new_tab: timed out after {timeout_secs}s"
+        )))
     }
 
     /// Set the download file name for the next download.
@@ -4523,7 +4598,8 @@ impl ChromiumPage {
                }} \
                requestAnimationFrame(step); \
              }})()",
-        )).await?;
+        ))
+        .await?;
         tokio::time::sleep(std::time::Duration::from_millis(duration_ms + 50)).await;
         Ok(())
     }
@@ -4555,61 +4631,80 @@ impl ChromiumPage {
     /// offline only needs the former, and its `new()` signature is identical
     /// (the `-1.0` throughput args mean "no throttling").
     pub async fn set_offline(&self, offline: bool) -> Result<()> {
-        self.page().execute(
-            chromiumoxide::cdp::browser_protocol::network::OverrideNetworkStateParams::new(
-                offline, 0.0, -1.0, -1.0,
-            ),
-        )
-        .await
-        .map_err(|e| Error::Browser(format!("set_offline: {e}")))?;
+        self.page()
+            .execute(
+                chromiumoxide::cdp::browser_protocol::network::OverrideNetworkStateParams::new(
+                    offline, 0.0, -1.0, -1.0,
+                ),
+            )
+            .await
+            .map_err(|e| Error::Browser(format!("set_offline: {e}")))?;
         Ok(())
     }
 
     /// Clear browser cache.
     pub async fn clear_cache(&self) -> Result<()> {
-        self.page().execute(
-            chromiumoxide::cdp::browser_protocol::network::ClearBrowserCacheParams::default(),
-        )
-        .await
-        .map_err(|e| Error::Browser(format!("clear_cache: {e}")))?;
+        self.page()
+            .execute(
+                chromiumoxide::cdp::browser_protocol::network::ClearBrowserCacheParams::default(),
+            )
+            .await
+            .map_err(|e| Error::Browser(format!("clear_cache: {e}")))?;
         Ok(())
     }
 
     /// Override geolocation and reload the current page.
     pub async fn set_location_and_reload(&self, lat: f64, lng: f64) -> Result<()> {
         self.set_geolocation(lat, lng).await?;
-        self.page().execute(
-            chromiumoxide::cdp::browser_protocol::page::ReloadParams::default(),
-        ).await.map_err(|e| Error::Browser(format!("reload: {e}")))?;
+        self.page()
+            .execute(chromiumoxide::cdp::browser_protocol::page::ReloadParams::default())
+            .await
+            .map_err(|e| Error::Browser(format!("reload: {e}")))?;
         Ok(())
     }
 
     /// Get all links (href) on the page.
     pub async fn links(&self) -> Result<Vec<String>> {
-        let val = self.execute(
-            "Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
-        ).await?;
-        Ok(val.as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        let val = self
+            .execute("Array.from(document.querySelectorAll('a[href]')).map(a => a.href)")
+            .await?;
+        Ok(val
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
     /// Get all image sources on the page.
     pub async fn images(&self) -> Result<Vec<String>> {
-        let val = self.execute(
-            "Array.from(document.querySelectorAll('img[src]')).map(img => img.src)"
-        ).await?;
-        Ok(val.as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        let val = self
+            .execute("Array.from(document.querySelectorAll('img[src]')).map(img => img.src)")
+            .await?;
+        Ok(val
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
     /// Disable images via Network.setBlockedUrls (URLPattern syntax, absolute).
     pub async fn disable_images(&self) -> Result<()> {
         self.set_blocked_urls(&[
-            "*://*/*/*.png", "*://*/*/*.jpg", "*://*/*/*.jpeg",
-            "*://*/*/*.gif", "*://*/*/*.webp", "*://*/*/*.svg", "*://*/*/*.ico",
-        ]).await
+            "*://*/*/*.png",
+            "*://*/*/*.jpg",
+            "*://*/*/*.jpeg",
+            "*://*/*/*.gif",
+            "*://*/*/*.webp",
+            "*://*/*/*.svg",
+            "*://*/*/*.ico",
+        ])
+        .await
     }
 
     /// Override the device scale factor.
@@ -4637,7 +4732,8 @@ impl ChromiumPage {
     /// Navigate and wait for network idle.
     pub async fn get_and_wait(&self, url: &str, timeout_secs: u64) -> Result<()> {
         self.get(url).await?;
-        self.wait_js("document.readyState === 'complete'", timeout_secs).await
+        self.wait_js("document.readyState === 'complete'", timeout_secs)
+            .await
     }
 
     /// Count elements matching selector.
@@ -4682,8 +4778,8 @@ impl ChromiumPage {
         } else {
             val
         };
-        let summary: crate::agent::PageSummary =
-            serde_json::from_value(val).map_err(|e| Error::Browser(format!("page_summary parse: {e}")))?;
+        let summary: crate::agent::PageSummary = serde_json::from_value(val)
+            .map_err(|e| Error::Browser(format!("page_summary parse: {e}")))?;
         Ok(summary)
     }
 
@@ -4694,14 +4790,20 @@ impl ChromiumPage {
     /// state checks by an AI agent.
     pub async fn page_snapshot(&self) -> Result<crate::agent::PageSnapshot> {
         let vis_text_js = crate::js_helpers::js_visible_text(2000);
-        let vis_text = self.execute(&vis_text_js).await?
-            .as_str().unwrap_or_default().to_string();
+        let vis_text = self
+            .execute(&vis_text_js)
+            .await?
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
 
         let url = self.url().await?;
         let title = self.title().await?;
-        let vp_val = self.execute(
-            "(function(){return JSON.stringify({w:window.innerWidth,h:window.innerHeight})})()"
-        ).await?;
+        let vp_val = self
+            .execute(
+                "(function(){return JSON.stringify({w:window.innerWidth,h:window.innerHeight})})()",
+            )
+            .await?;
         let viewport: serde_json::Value = match vp_val {
             serde_json::Value::String(s) => serde_json::from_str(&s).unwrap_or_default(),
             v => v,
@@ -4724,9 +4826,18 @@ impl ChromiumPage {
             ),
             scroll_position: format!(
                 "x={} y={}/{}",
-                scroll.get("scrollX").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
-                scroll.get("scrollY").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
-                scroll.get("scrollHeight").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
+                scroll
+                    .get("scrollX")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as i32,
+                scroll
+                    .get("scrollY")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as i32,
+                scroll
+                    .get("scrollHeight")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as i32,
             ),
             interactive_elements: interactive,
             visible_text: vis_text,
@@ -4927,12 +5038,7 @@ impl ChromiumPage {
     /// ```ignore
     /// let el = page.auto_retry(|| page.ele("text=Login"), 3, 500).await;
     /// ```
-    pub async fn auto_retry<F, Fut, T>(
-        &self,
-        op: F,
-        max_attempts: u32,
-        delay_ms: u64,
-    ) -> Result<T>
+    pub async fn auto_retry<F, Fut, T>(&self, op: F, max_attempts: u32, delay_ms: u64) -> Result<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -4970,12 +5076,15 @@ impl ChromiumPage {
         let idx = titles
             .iter()
             .position(|t| t.contains(keyword))
-            .ok_or_else(|| Error::Browser(format!(
-                "activate_tab: no tab with title containing '{keyword}'"
-            )))?;
-        let target_page = tabs.into_iter().nth(idx).ok_or_else(|| {
-            Error::Browser("activate_tab: tab index out of range".into())
-        })?;
+            .ok_or_else(|| {
+                Error::Browser(format!(
+                    "activate_tab: no tab with title containing '{keyword}'"
+                ))
+            })?;
+        let target_page = tabs
+            .into_iter()
+            .nth(idx)
+            .ok_or_else(|| Error::Browser("activate_tab: tab index out of range".into()))?;
         // Bring the tab to the foreground
         target_page
             .execute(chromiumoxide::cdp::browser_protocol::page::BringToFrontParams::default())
@@ -4995,12 +5104,15 @@ impl ChromiumPage {
         let idx = urls
             .iter()
             .position(|u| u.contains(keyword))
-            .ok_or_else(|| Error::Browser(format!(
-                "activate_tab_by_url: no tab with url containing '{keyword}'"
-            )))?;
-        let target_page = tabs.into_iter().nth(idx).ok_or_else(|| {
-            Error::Browser("activate_tab_by_url: tab index out of range".into())
-        })?;
+            .ok_or_else(|| {
+                Error::Browser(format!(
+                    "activate_tab_by_url: no tab with url containing '{keyword}'"
+                ))
+            })?;
+        let target_page = tabs
+            .into_iter()
+            .nth(idx)
+            .ok_or_else(|| Error::Browser("activate_tab_by_url: tab index out of range".into()))?;
         target_page
             .execute(chromiumoxide::cdp::browser_protocol::page::BringToFrontParams::default())
             .await
@@ -5008,7 +5120,6 @@ impl ChromiumPage {
         self.set_page(target_page);
         Ok(())
     }
-
 }
 
 // ── InterceptGuard ──────────────────────────────────────────
