@@ -27,12 +27,23 @@ const HTML: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>R
 <div id="result"></div>
 <div id="rc">rc-init</div>
 <div id="dc">dc-init</div>
+<input id="ph" placeholder="搜索关键词">
+<div data-testid="tid">TID-VAL</div>
+<button id="rolebtn">RoleBtn</button>
+<label for="lbl">用户名</label><input id="lbl">
+<div class="card" data-kind="x">CARD</div>
+<button id="delayed" disabled>Delayed</button>
+<div id="dresult"></div>
 <div id="bottom" style="margin-top:3000px">BOTTOM</div>
 <script>
 document.getElementById('btn').addEventListener('click', async () => {
   const r = await fetch('/api/data');
   const j = await r.json();
   document.getElementById('result').textContent = j.msg + j.n;
+});
+setTimeout(function(){ document.getElementById('delayed').disabled = false; }, 600);
+document.getElementById('delayed').addEventListener('click', function(){
+  document.getElementById('dresult').textContent = 'CLICKED';
 });
 document.getElementById('rc').addEventListener('contextmenu', e => {
   e.preventDefault();
@@ -261,6 +272,75 @@ async fn main() -> rpage::Result<()> {
         Ok(v) => r.check("s_eles", v.len() >= 4, format!("{} divs", v.len())),
         Err(e) => r.check("s_eles", false, e.to_string()),
     }
+
+    // ── data_packets (multi-packet harvest, DrissionPage listen.steps()) ──
+    let pkts = page.data_packets("/api/data").await;
+    r.check(
+        "data_packets",
+        !pkts.is_empty() && pkts.iter().any(|p| p.body_text().contains("hello")),
+        format!("{} packets", pkts.len()),
+    );
+
+    // ── @@ same-element AND / @| OR locators (DrissionPage) ──
+    match page.ele("tag:div@@class=card").await {
+        Ok(e) => r.check("locator @@(AND)", e.text() == "CARD", e.text().to_string()),
+        Err(e) => r.check("locator @@(AND)", false, e.to_string()),
+    }
+    match page.ele("@|id=nope@|data-testid=tid").await {
+        Ok(e) => r.check("locator @|(OR)", e.text() == "TID-VAL", e.text().to_string()),
+        Err(e) => r.check("locator @|(OR)", false, e.to_string()),
+    }
+
+    // ── get_by_* semantic locators (Playwright) ──
+    match page.get_by_placeholder("搜索").await {
+        Ok(e) => r.check("get_by_placeholder", e.attr("id") == Some("ph"), format!("{:?}", e.attr("id"))),
+        Err(e) => r.check("get_by_placeholder", false, e.to_string()),
+    }
+    match page.get_by_test_id("tid").await {
+        Ok(e) => r.check("get_by_test_id", e.text() == "TID-VAL", e.text().to_string()),
+        Err(e) => r.check("get_by_test_id", false, e.to_string()),
+    }
+    match page.get_by_role("button").await {
+        Ok(e) => r.check("get_by_role", e.tag() == "button", format!("tag={}", e.tag())),
+        Err(e) => r.check("get_by_role", false, e.to_string()),
+    }
+    match page.get_by_label("用户名").await {
+        Ok(e) => r.check("get_by_label", e.attr("id") == Some("lbl"), format!("{:?}", e.attr("id"))),
+        Err(e) => r.check("get_by_label", false, e.to_string()),
+    }
+
+    // ── actionability: #delayed starts disabled, enables after 600ms;
+    //    click() waits for it to become actionable before acting ──
+    page.ele("#delayed").await?.click().await?;
+    page.sleep(Duration::from_millis(150)).await;
+    let dres = page.ele("#dresult").await?.text().to_string();
+    r.check("wait_actionable click", dres == "CLICKED", dres);
+
+    // ── route.fulfill: intercept /api/ and fabricate the response (Playwright) ──
+    page.get(&base).await?; // reload to clear #result
+    let guard = page.enable_intercept("*://*/api/*").await?;
+    page.ele("#btn").await?.click().await?;
+    let mut filled = false;
+    for _ in 0..50 {
+        if let Some(req) = guard.paused_requests().first() {
+            guard
+                .fulfill_json(req.request_id.as_ref(), r#"{"msg":"MOCK","n":7}"#)
+                .await?;
+            filled = true;
+            break;
+        }
+        page.sleep(Duration::from_millis(100)).await;
+    }
+    let _ = page
+        .wait_js("document.getElementById('result').textContent.length>0", 5)
+        .await;
+    let fr = page.ele("#result").await?.text().to_string();
+    r.check(
+        "fulfill_json mock",
+        filled && fr == "MOCK7",
+        format!("filled={filled} result={fr}"),
+    );
+    guard.disable().await?;
 
     page.quit().await?;
 

@@ -305,6 +305,44 @@ impl Element {
             .await
     }
 
+    /// Wait until this element is *actionable* — attached to the DOM, not
+    /// `disabled`, and visible (displayed, non-zero box, not `opacity:0`). This
+    /// is a subset of Playwright's actionability checks (no stable-position or
+    /// hit-test step). [`click`](Self::click) runs it best-effort before acting,
+    /// so a transient "still rendering / still disabled" state resolves on its
+    /// own; you can also call it explicitly. Returns `Err(Timeout)` if the
+    /// element never becomes actionable. XPath-backed elements skip the check
+    /// (they re-locate the node at click time).
+    pub async fn wait_actionable(&self, timeout_secs: u64) -> Result<()> {
+        if self.fallback_xpath.is_some() {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let ok = self
+                .eval_bool(
+                    "function(){\
+                        if(!this||!this.isConnected) return false;\
+                        if(this.disabled) return false;\
+                        var s=getComputedStyle(this);\
+                        if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity)<=0) return false;\
+                        var r=this.getBoundingClientRect();\
+                        return r.width>0 && r.height>0;\
+                    }",
+                )
+                .await;
+            if ok {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout(
+                    "element not actionable (visible + enabled) within timeout".into(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     /// The locator used to find this element.
     pub fn locator(&self) -> Option<&Locator> {
         self.locator.as_ref()
@@ -430,6 +468,11 @@ impl Element {
     /// Click this element. Falls back to JS click if CDP click fails.
     /// For XPath-backed elements, uses JS XPath re-location.
     pub async fn click(&self) -> Result<()> {
+        // Best-effort actionability wait (Playwright-style): give the element a
+        // moment to become visible + enabled before clicking. Ignored on
+        // timeout so the JS-click fallback below still handles odd cases; a
+        // no-op for XPath-backed elements.
+        let _ = self.wait_actionable(3).await;
         // If we have a fallback_xpath, locate the element via JS, then
         // dispatch a *real* CDP mouse click at its coordinates rather than
         // calling `el.click()` from JS. `el.click()` is a script-synthesized

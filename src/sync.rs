@@ -107,6 +107,28 @@ impl SyncPage {
         Ok(els.into_iter().map(|e| SyncElement { inner: e, rt: handle.clone() }).collect())
     }
 
+    // ── 语义定位 (Playwright get_by_*) ──
+    pub fn get_by_text(&self, text: &str) -> Result<SyncElement> {
+        let el = self.rt().block_on(self.inner.get_by_text(text))?;
+        Ok(SyncElement { inner: el, rt: self.rt().handle().clone() })
+    }
+    pub fn get_by_placeholder(&self, placeholder: &str) -> Result<SyncElement> {
+        let el = self.rt().block_on(self.inner.get_by_placeholder(placeholder))?;
+        Ok(SyncElement { inner: el, rt: self.rt().handle().clone() })
+    }
+    pub fn get_by_test_id(&self, test_id: &str) -> Result<SyncElement> {
+        let el = self.rt().block_on(self.inner.get_by_test_id(test_id))?;
+        Ok(SyncElement { inner: el, rt: self.rt().handle().clone() })
+    }
+    pub fn get_by_role(&self, role: &str) -> Result<SyncElement> {
+        let el = self.rt().block_on(self.inner.get_by_role(role))?;
+        Ok(SyncElement { inner: el, rt: self.rt().handle().clone() })
+    }
+    pub fn get_by_label(&self, label: &str) -> Result<SyncElement> {
+        let el = self.rt().block_on(self.inner.get_by_label(label))?;
+        Ok(SyncElement { inner: el, rt: self.rt().handle().clone() })
+    }
+
     pub fn ele_or_none(&self, selector: &str) -> Option<SyncElement> {
         self.rt().block_on(self.inner.ele_or_none(selector))
             .map(|e| SyncElement { inner: e, rt: self.rt().handle().clone() })
@@ -214,6 +236,7 @@ impl SyncPage {
     pub fn run_cdp(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> { self.rt().block_on(self.inner.run_cdp(method, params)) }
     pub fn get_response_body(&self, request_id: &str) -> Result<crate::chromium_page::ResponseBody> { self.rt().block_on(self.inner.get_response_body(request_id)) }
     pub fn wait_data_packet(&self, url_pattern: &str, timeout_secs: u64) -> Result<crate::chromium_page::DataPacket> { self.rt().block_on(self.inner.wait_data_packet(url_pattern, timeout_secs)) }
+    pub fn data_packets(&self, url_pattern: &str) -> Vec<crate::chromium_page::DataPacket> { self.rt().block_on(self.inner.data_packets(url_pattern)) }
     pub fn listen_start(&self) -> Result<()> { self.rt().block_on(self.inner.listen_start()) }
     pub fn listen_stop(&self) -> Result<()> { self.rt().block_on(self.inner.listen_stop()) }
     pub fn get_packets(&self, url_pattern: &str) -> Vec<crate::network::RequestInfo> { self.inner.get_packets(url_pattern) }
@@ -454,6 +477,7 @@ impl SyncElement {
     pub fn wait_for_enabled(&self) -> Result<()> { self.rt.block_on(self.inner.wait_for_enabled()) }
     pub fn wait_for_enabled_with_timeout(&self, timeout: Duration) -> Result<()> { self.rt.block_on(self.inner.wait_for_enabled_with_timeout(timeout)) }
     pub fn wait_for_clickable(&self) -> Result<()> { self.rt.block_on(self.inner.wait_for_clickable()) }
+    pub fn wait_actionable(&self, timeout_secs: u64) -> Result<()> { self.rt.block_on(self.inner.wait_actionable(timeout_secs)) }
     pub fn wait_for_stale(&self) -> Result<()> { self.rt.block_on(self.inner.wait_for_stale()) }
     pub fn wait_for_text(&self, text: &str) -> Result<()> { self.rt.block_on(self.inner.wait_for_text(text)) }
     pub fn wait_for_text_eq(&self, text: &str) -> Result<()> { self.rt.block_on(self.inner.wait_for_text_eq(text)) }
@@ -497,6 +521,16 @@ impl SyncInterceptGuard {
     /// 拒绝一个被暂停的请求（按 BlockedByClient 失败）。
     pub fn fail_request(&self, request_id: &str) -> Result<()> {
         self.rt.block_on(self.inner.fail_request(request_id))
+    }
+
+    /// 用伪造响应放行被暂停的请求（对标 Playwright `route.fulfill`）。
+    pub fn fulfill_request(&self, request_id: &str, status: u16, headers: &[(&str, &str)], body: &[u8]) -> Result<()> {
+        self.rt.block_on(self.inner.fulfill_request(request_id, status, headers, body))
+    }
+
+    /// 便捷：用 JSON body 伪造响应（200 + application/json）。
+    pub fn fulfill_json(&self, request_id: &str, json: &str) -> Result<()> {
+        self.rt.block_on(self.inner.fulfill_json(request_id, json))
     }
 
     /// 关闭拦截（也可直接 drop 本守卫）。

@@ -48,6 +48,11 @@
 - **JS XPath 回退** — 非 CSS 定位器（`text:`/`tag:`）自动回退 XPath
 - **原始 CDP 直通** — `run_cdp()` 执行任意 CDP 命令；`get_response_body()` 抓响应体（含 base64 解码）
 - **元素状态** — `is_in_viewport()` / `is_alive()`，对标 DrissionPage `states`
+- **语义定位** — `get_by_role/text/label/placeholder/test_id`，对标 Playwright
+- **响应 mock** — `InterceptGuard::fulfill_request/fulfill_json` 伪造响应，对标 Playwright `route.fulfill`
+- **多条件定位** — `@@` 同元素 AND / `@|` OR，对标 DrissionPage
+- **持续抓包** — `data_packets()` 一次取所有匹配的完整 DataPacket（含 body）
+- **自动可操作性等待** — `click()` 前自动等 visible+enabled，对标 Playwright actionability
 - **DrissionPage 定位器** — 文本/属性运算符 `=`/`:`/`^`/`$`（精确/包含/前缀/后缀）全支持
 
 ## 🚀 快速开始
@@ -223,7 +228,9 @@ let els = page.eles("h3").await?;
 | `text:登录`（或 `text*=登录`） | 文本包含 |
 | `text^登录` | 文本前缀 |
 | `text$登录` | 文本后缀 |
-| `tag:form@@text=登录` | 链式定位 |
+| `tag:div@@class=x@@text:y` | 同元素多条件 AND |
+| `@|class=a@|class=b` | 同元素多条件 OR |
+| `a@@@b@@@c` | 后代链式（rpage 扩展） |
 
 ### 条件等待 (10)
 
@@ -593,8 +600,10 @@ for r in page.get_responses("/api/") {
 ```rust
 page.listen_start().await?;
 page.ele("#load").await?.click().await?;     // 触发 XHR / fetch
-let pkt = page.wait_data_packet("/api/data", 10).await?;
+let pkt = page.wait_data_packet("/api/data", 10).await?;          // 等一个
 println!("{} {} -> {}", pkt.status, pkt.url, pkt.body_text());
+// 或一次取所有匹配的完整包（对标 listen.steps()）
+for p in page.data_packets("/api/").await { println!("{}", p.body_text()); }
 // pkt.method / status / mime_type / request_headers / response_headers / response_body
 ```
 
@@ -614,6 +623,39 @@ for row in &rows { println!("{}", row.text()); }
 let el = page.ele("#item").await?;
 el.is_in_viewport().await;   // 是否在可视区内
 el.is_alive().await;          // 是否仍挂在 DOM 上
+```
+
+### 语义定位 (Playwright `get_by_*` 对标)
+
+```rust
+page.get_by_text("登录").await?;          // 可见文本（包含）
+page.get_by_role("button").await?;        // ARIA role（含 button/link/textbox… 隐含 role）
+page.get_by_label("用户名").await?;       // 关联 label（aria-label / <label for> / 包裹）
+page.get_by_placeholder("搜索").await?;   // placeholder（包含）
+page.get_by_test_id("submit").await?;     // data-testid（精确）
+```
+
+### 响应 mock (Playwright `route.fulfill` 对标)
+
+拦截请求并**伪造响应**，不走网络 —— 测试 / 反爬 / 离线复现：
+
+```rust
+let guard = page.enable_intercept("*://*/api/*").await?;
+page.click_ele("#load").await?;
+for req in guard.paused_requests() {
+    guard.fulfill_json(req.request_id.as_ref(), r#"{"mock":true}"#).await?;
+    // 或自定义状态/头/体：
+    // guard.fulfill_request(id, 200, &[("Content-Type","text/html")], body).await?;
+}
+guard.disable().await?;
+```
+
+### 自动可操作性等待 (Playwright actionability)
+
+`click()` 操作前自动等元素 visible + enabled（best-effort，超时不阻断），减少偶发"点了没反应"；也可显式调用：
+
+```rust
+page.ele("#submit").await?.wait_actionable(5).await?;
 ```
 
 ### 网络监听模式 — iter10

@@ -1371,6 +1371,65 @@ impl ChromiumPage {
         crate::session_page::SessionPage::eles_from_html(&html, locator_str)
     }
 
+    // ── 语义定位 (Playwright get_by_*) ────────────────────────
+
+    /// Locate by visible text (substring match) — Playwright's `get_by_text`.
+    pub async fn get_by_text(&self, text: &str) -> Result<Element> {
+        self.ele(&format!("text:{text}")).await
+    }
+
+    /// Locate a control by its placeholder (substring) — `get_by_placeholder`.
+    pub async fn get_by_placeholder(&self, placeholder: &str) -> Result<Element> {
+        self.ele(&format!("@placeholder:{placeholder}")).await
+    }
+
+    /// Locate by `data-testid` (exact) — Playwright's `get_by_test_id`.
+    pub async fn get_by_test_id(&self, test_id: &str) -> Result<Element> {
+        self.ele(&format!("@data-testid={test_id}")).await
+    }
+
+    /// Locate by ARIA role — Playwright's `get_by_role`. Matches an explicit
+    /// `role=` attribute, plus the *implicit* role of common HTML elements
+    /// (button / link / textbox / checkbox / radio / heading / img / list /
+    /// listitem). Other roles match an explicit `role` attribute only.
+    pub async fn get_by_role(&self, role: &str) -> Result<Element> {
+        let r = role.replace('\'', "\\'");
+        let implicit = match role {
+            "button" => {
+                "self::button or self::input[@type='button' or @type='submit' or @type='reset']"
+            }
+            "link" => "self::a[@href]",
+            "textbox" => "self::textarea or self::input[not(@type) or @type='text' or @type='search' or @type='email' or @type='url' or @type='tel' or @type='password']",
+            "checkbox" => "self::input[@type='checkbox']",
+            "radio" => "self::input[@type='radio']",
+            "heading" => "self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::h6",
+            "img" => "self::img",
+            "list" => "self::ul or self::ol",
+            "listitem" => "self::li",
+            _ => "",
+        };
+        let xpath = if implicit.is_empty() {
+            format!("//*[@role='{r}']")
+        } else {
+            format!("//*[@role='{r}' or {implicit}]")
+        };
+        self.ele(&format!("xpath:{xpath}")).await
+    }
+
+    /// Locate a form control by its associated label — Playwright's
+    /// `get_by_label`. Matches (in order) `aria-label`, a wrapping `<label>`,
+    /// or a `<label for=…>` pointing at the control.
+    pub async fn get_by_label(&self, label: &str) -> Result<Element> {
+        let l = label.replace('\'', "\\'");
+        let xpath = format!(
+            "//*[@aria-label='{l}'] | //label[normalize-space(.)='{l}']//input \
+             | //label[normalize-space(.)='{l}']//textarea \
+             | //input[@id=//label[normalize-space(.)='{l}']/@for] \
+             | //textarea[@id=//label[normalize-space(.)='{l}']/@for]"
+        );
+        self.ele(&format!("xpath:{xpath}")).await
+    }
+
     /// Find all matching elements. Auto-retries for up to configured timeout.
     pub async fn eles(&self, locator_str: &str) -> Result<Vec<Element>> {
         let locator = crate::locator::parse_locator(locator_str)?;
@@ -4341,42 +4400,7 @@ impl ChromiumPage {
                 .into_iter()
                 .last()
             {
-                let req = self
-                    .network_monitor
-                    .requests()
-                    .into_iter()
-                    .rev()
-                    .find(|r| r.request_id == resp.request_id);
-
-                // The body isn't available until loadingFinished; retry briefly.
-                let mut response_body = None;
-                let body_deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(2000);
-                loop {
-                    if let Ok(b) = self.get_response_body(&resp.request_id).await {
-                        response_body = Some(b);
-                        break;
-                    }
-                    if std::time::Instant::now() >= body_deadline {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-
-                let (method, resource_type, request_headers) = req
-                    .map(|r| (r.method, r.resource_type, r.headers))
-                    .unwrap_or_else(|| (String::new(), String::new(), HashMap::new()));
-                return Ok(DataPacket {
-                    url: resp.url,
-                    method,
-                    status: resp.status,
-                    resource_type,
-                    request_id: resp.request_id,
-                    mime_type: resp.mime_type,
-                    request_headers,
-                    response_headers: resp.headers,
-                    response_body,
-                });
+                return Ok(self.build_data_packet(resp).await);
             }
             if start.elapsed() > deadline {
                 return Err(Error::Timeout(format!(
@@ -4384,6 +4408,61 @@ impl ChromiumPage {
                 )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Return a full [`DataPacket`] (request + response + body) for **every**
+    /// recorded response whose URL contains `url_pattern` — the multi-packet
+    /// companion to [`wait_data_packet`](Self::wait_data_packet), equivalent to
+    /// DrissionPage's `listen.steps()`. Call `listen_start()` (or any monitored
+    /// page) first, drive some activity, then harvest all matching XHR/fetch
+    /// payloads at once. Clear between runs with `network_monitor().clear()`.
+    pub async fn data_packets(&self, url_pattern: &str) -> Vec<DataPacket> {
+        let resps = self.network_monitor.find_responses_by_url(url_pattern);
+        let mut packets = Vec::with_capacity(resps.len());
+        for resp in resps {
+            packets.push(self.build_data_packet(resp).await);
+        }
+        packets
+    }
+
+    /// Assemble a full `DataPacket` from a recorded response, fetching its body
+    /// with a short retry (the body isn't available until loadingFinished).
+    /// Shared by `wait_data_packet` / `data_packets`.
+    async fn build_data_packet(&self, resp: crate::network::ResponseRecord) -> DataPacket {
+        let req = self
+            .network_monitor
+            .requests()
+            .into_iter()
+            .rev()
+            .find(|r| r.request_id == resp.request_id);
+
+        let mut response_body = None;
+        let body_deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        loop {
+            if let Ok(b) = self.get_response_body(&resp.request_id).await {
+                response_body = Some(b);
+                break;
+            }
+            if std::time::Instant::now() >= body_deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        let (method, resource_type, request_headers) = req
+            .map(|r| (r.method, r.resource_type, r.headers))
+            .unwrap_or_else(|| (String::new(), String::new(), HashMap::new()));
+        DataPacket {
+            url: resp.url,
+            method,
+            status: resp.status,
+            resource_type,
+            request_id: resp.request_id,
+            mime_type: resp.mime_type,
+            request_headers,
+            response_headers: resp.headers,
+            response_body,
         }
     }
 
@@ -4992,6 +5071,67 @@ impl InterceptGuard {
             list.retain(|r| r.request_id.as_ref() != request_id);
         }
         Ok(())
+    }
+
+    /// Fulfill a paused request with a fabricated response — the equivalent of
+    /// Playwright's `route.fulfill`. Instead of letting the request hit the
+    /// network (`continue_request`) or killing it (`fail_request`), you return
+    /// your own status / headers / body. The request never leaves the browser.
+    ///
+    /// ```ignore
+    /// let guard = page.enable_intercept("*/api/user").await?;
+    /// page.ele("#load").await?.click().await?;
+    /// for req in guard.paused_requests() {
+    ///     guard.fulfill_request(req.request_id.as_ref(), 200,
+    ///         &[("Content-Type", "application/json")], br#"{"name":"mock"}"#).await?;
+    /// }
+    /// ```
+    pub async fn fulfill_request(
+        &self,
+        request_id: &str,
+        status: u16,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<()> {
+        use base64::Engine;
+        use chromiumoxide::cdp::browser_protocol::fetch::{
+            FulfillRequestParams, HeaderEntry, RequestId,
+        };
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(body);
+        let mut builder = FulfillRequestParams::builder()
+            .request_id(RequestId::new(request_id))
+            .response_code(status as i64)
+            .body(chromiumoxide::types::Binary::from(body_b64));
+        if !headers.is_empty() {
+            let hdrs: Vec<HeaderEntry> = headers
+                .iter()
+                .map(|(k, v)| HeaderEntry::new(k.to_string(), v.to_string()))
+                .collect();
+            builder = builder.response_headers(hdrs);
+        }
+        let params = builder
+            .build()
+            .map_err(|e| Error::Browser(format!("fulfill_request build: {e}")))?;
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| Error::Browser(format!("fulfill_request: {e}")))?;
+        if let Ok(mut list) = self.paused.lock() {
+            list.retain(|r| r.request_id.as_ref() != request_id);
+        }
+        Ok(())
+    }
+
+    /// Convenience: fulfill a paused request with a JSON body (HTTP 200,
+    /// `Content-Type: application/json`).
+    pub async fn fulfill_json(&self, request_id: &str, json: &str) -> Result<()> {
+        self.fulfill_request(
+            request_id,
+            200,
+            &[("Content-Type", "application/json")],
+            json.as_bytes(),
+        )
+        .await
     }
 
     /// Disable interception (also happens on drop).
