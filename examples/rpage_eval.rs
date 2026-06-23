@@ -252,6 +252,16 @@ async fn main() -> rpage::Result<()> {
         "#title attached",
     );
 
+    // ── static-snapshot elements (DrissionPage s_ele/s_eles) ──
+    match page.s_ele("#title").await {
+        Ok(e) => r.check("s_ele", e.text() == "RPage 测试", e.text().to_string()),
+        Err(e) => r.check("s_ele", false, e.to_string()),
+    }
+    match page.s_eles("div").await {
+        Ok(v) => r.check("s_eles", v.len() >= 4, format!("{} divs", v.len())),
+        Err(e) => r.check("s_eles", false, e.to_string()),
+    }
+
     page.quit().await?;
 
     println!("\n=== {} passed, {} failed ===", r.pass, r.fail);

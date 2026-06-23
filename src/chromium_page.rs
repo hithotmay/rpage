@@ -1169,6 +1169,23 @@ impl ChromiumPage {
         self.ele_by_xpath_fallback(&xpath, self.opts.timeout.as_secs()).await
     }
 
+    /// Static-snapshot element lookup (DrissionPage `s_ele`): grab the page's
+    /// *current* HTML once and query it with the scraper/XPath engine,
+    /// returning a detached element that doesn't touch live CDP. Much faster
+    /// than [`ele`](Self::ele) for bulk read-only extraction; the trade-off is
+    /// the returned element has no live page handle, so it can't be clicked or
+    /// typed into (use `ele` for interaction).
+    pub async fn s_ele(&self, locator_str: &str) -> Result<Element> {
+        let html = self.html().await?;
+        crate::session_page::SessionPage::ele_from_html(&html, locator_str)
+    }
+
+    /// Static-snapshot version of [`eles`](Self::eles) (DrissionPage `s_eles`).
+    pub async fn s_eles(&self, locator_str: &str) -> Result<Vec<Element>> {
+        let html = self.html().await?;
+        crate::session_page::SessionPage::eles_from_html(&html, locator_str)
+    }
+
     /// Find all matching elements. Auto-retries for up to configured timeout.
     pub async fn eles(&self, locator_str: &str) -> Result<Vec<Element>> {
         let locator = crate::locator::parse_locator(locator_str)?;

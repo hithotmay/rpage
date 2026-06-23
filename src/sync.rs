@@ -94,6 +94,17 @@ impl SyncPage {
         Ok(els.into_iter().map(|e| SyncElement { inner: e, rt: handle.clone() }).collect())
     }
 
+    pub fn s_ele(&self, selector: &str) -> Result<SyncElement> {
+        let el = self.rt().block_on(self.inner.s_ele(selector))?;
+        Ok(SyncElement { inner: el, rt: self.rt().handle().clone() })
+    }
+
+    pub fn s_eles(&self, selector: &str) -> Result<Vec<SyncElement>> {
+        let els = self.rt().block_on(self.inner.s_eles(selector))?;
+        let handle = self.rt().handle().clone();
+        Ok(els.into_iter().map(|e| SyncElement { inner: e, rt: handle.clone() }).collect())
+    }
+
     pub fn ele_or_none(&self, selector: &str) -> Option<SyncElement> {
         self.rt().block_on(self.inner.ele_or_none(selector))
             .map(|e| SyncElement { inner: e, rt: self.rt().handle().clone() })

@@ -597,6 +597,16 @@ println!("{} {} -> {}", pkt.status, pkt.url, pkt.body_text());
 // pkt.method / status / mime_type / request_headers / response_headers / response_body
 ```
 
+### 静态快照元素 (DrissionPage `s_ele` 对标)
+
+一次解析当前页面 HTML，返回不依赖实时 CDP 的静态元素，批量只读提取更快：
+
+```rust
+let title = page.s_ele("#title").await?;       // 静态查找
+let rows = page.s_eles("table tr").await?;      // 批量，快
+for row in &rows { println!("{}", row.text()); }
+```
+
 ### 元素状态 (DrissionPage `states` 对标)
 
 ```rust
