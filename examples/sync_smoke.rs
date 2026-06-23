@@ -104,6 +104,29 @@ fn main() -> rpage::Result<()> {
         Err(e) => check("wait_data_packet", false, e.to_string()),
     }
 
+    // SyncInterceptGuard: reload (clears #result), then block + reject the
+    // /api/ request so the fetch fails and #result stays empty.
+    p.get(&base)?;
+    let guard = p.enable_intercept("*://*/api/*")?;
+    p.ele("#btn")?.click()?;
+    let mut blocked = false;
+    for _ in 0..50 {
+        if let Some(req) = guard.paused_requests().first() {
+            guard.fail_request(req.request_id.as_ref())?;
+            blocked = true;
+            break;
+        }
+        p.sleep(std::time::Duration::from_millis(100));
+    }
+    p.sleep(std::time::Duration::from_millis(300));
+    let blocked_result = p.ele("#result")?.text().to_string();
+    check(
+        "intercept fail_request",
+        blocked && blocked_result.is_empty(),
+        format!("blocked={blocked} result='{blocked_result}'"),
+    );
+    guard.disable()?;
+
     p.quit()?;
     println!("\n=== {pass} passed, {fail} failed ===");
     if fail > 0 {

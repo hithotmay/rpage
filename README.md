@@ -523,7 +523,7 @@ page.download_manager().completed();        // 已完成的下载
 let guard = page.enable_intercept("*/api/*").await?;
 tokio::time::sleep(Duration::from_secs(5)).await;
 for req in guard.paused_requests() {
-    guard.continue_request(&req.request_id, None).await?;
+    guard.continue_request(req.request_id.as_ref(), None).await?;
 }
 guard.disable().await?;  // 或 drop(guard) 自动关闭
 ```
@@ -630,12 +630,22 @@ page.listen_stop().await?;                               // 停止监听
 ```rust
 let guard = page.enable_intercept("*://*/api/*").await?;
 for req in guard.paused_requests() {
-    let id = req.request_id.to_string();
-    guard.continue_request(&id, None).await?;                 // 继续
-    // guard.continue_request(&id, Some("https://new.url")).await?; // 重定向
-    // guard.fail_request(&id).await?;                            // 拒绝
+    guard.continue_request(req.request_id.as_ref(), None).await?;                 // 继续
+    // guard.continue_request(req.request_id.as_ref(), Some("https://new.url")).await?; // 重定向
+    // guard.fail_request(req.request_id.as_ref()).await?;                            // 拒绝
 }
 guard.disable().await?;                                  // 或 drop(guard) 自动关闭
+```
+
+同步用法相同 —— `SyncPage::enable_intercept` 返回 `SyncInterceptGuard`，零 await：
+
+```rust
+let guard = p.enable_intercept("*://*/api/*")?;
+p.click_ele("#load")?;                                   // 触发请求
+for req in guard.paused_requests() {
+    guard.fail_request(req.request_id.as_ref())?;        // 拦截并拒绝
+}
+guard.disable()?;
 ```
 
 ### 设备模拟 + 网络控制 (9) — iter10

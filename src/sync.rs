@@ -12,7 +12,9 @@
 //! ```
 
 use crate::element::Element;
-use crate::chromium_page::{ChromiumPage, CookieInfo, FrameContext, InterceptGuard, PdfOptions};
+use crate::chromium_page::{
+    ChromiumPage, CookieInfo, FrameContext, InterceptGuard, InterceptedRequest, PdfOptions,
+};
 use crate::error::{Error, Result};
 use crate::agent::{ActionAttempt, InteractiveElement, PageSnapshot, PageSummary};
 use crate::download::DownloadInfo;
@@ -333,7 +335,13 @@ impl SyncPage {
 
     // ── 拦截 ──────────────────────────────────────────
 
-    pub fn enable_intercept(&self, pattern: &str) -> Result<InterceptGuard> { self.rt().block_on(self.inner.enable_intercept(pattern)) }
+    /// Enable Fetch interception and return a *synchronous* guard. Unlike the
+    /// raw async `InterceptGuard`, `SyncInterceptGuard` lets sync callers
+    /// continue / redirect / fail paused requests without touching a runtime.
+    pub fn enable_intercept(&self, pattern: &str) -> Result<SyncInterceptGuard> {
+        let inner = self.rt().block_on(self.inner.enable_intercept(pattern))?;
+        Ok(SyncInterceptGuard { inner, rt: self.rt().handle().clone() })
+    }
 
     // ── 刷新元素 ──────────────────────────────────────
 
@@ -461,5 +469,38 @@ impl SyncElement {
     pub fn eles(&self, selector: &str) -> Result<Vec<SyncElement>> {
         let els = self.inner.eles(selector)?;
         Ok(els.into_iter().map(|e| SyncElement { inner: e, rt: self.rt.clone() }).collect())
+    }
+}
+
+/// 同步版请求拦截守卫 — 让 sync 用户拦截 / 改写 / 拒绝被暂停的请求。
+///
+/// 由 [`SyncPage::enable_intercept`] 返回。匹配 pattern 的请求会被 Fetch 域
+/// 暂停；用 [`paused_requests`](Self::paused_requests) 取出，再
+/// [`continue_request`](Self::continue_request)（可改写 URL）或
+/// [`fail_request`](Self::fail_request) 放行/拒绝。`disable()` 或 drop 关闭。
+pub struct SyncInterceptGuard {
+    inner: InterceptGuard,
+    rt: tokio::runtime::Handle,
+}
+
+impl SyncInterceptGuard {
+    /// 当前被暂停（尚未 continue/fail）的请求。
+    pub fn paused_requests(&self) -> Vec<InterceptedRequest> {
+        self.inner.paused_requests()
+    }
+
+    /// 放行一个被暂停的请求，`new_url` 非 None 时重定向到新 URL。
+    pub fn continue_request(&self, request_id: &str, new_url: Option<&str>) -> Result<()> {
+        self.rt.block_on(self.inner.continue_request(request_id, new_url))
+    }
+
+    /// 拒绝一个被暂停的请求（按 BlockedByClient 失败）。
+    pub fn fail_request(&self, request_id: &str) -> Result<()> {
+        self.rt.block_on(self.inner.fail_request(request_id))
+    }
+
+    /// 关闭拦截（也可直接 drop 本守卫）。
+    pub fn disable(&self) -> Result<()> {
+        self.rt.block_on(self.inner.disable())
     }
 }
